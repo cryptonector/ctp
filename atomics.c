@@ -32,7 +32,6 @@
 
 #include "atomics.h"
 
-#ifndef HAVE_ILLUMOS_ATOMICS
 /*
  * XXX We've left Illumos atomics behind; rename symbols to avoid
  * conflicts.
@@ -45,9 +44,11 @@
 #elif defined(WIN32)
 #include <windows.h>
 #include <WinBase.h>
+#elif defined(HAVE_INTEL_INTRINSICS)
+#include <ia64intrin.h>
 #elif defined(HAVE_PTHREAD)
 #include <pthread.h>
-pthread_mutex_t atomic_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t atomic_lock = PTHREAD_MUTEX_INITIALIZER;
 #elif defined(NO_THREADS)
 /* Nothing to do */
 #else
@@ -62,7 +63,9 @@ atomic_inc_32_nv(volatile uint32_t *p)
 #elif defined(HAVE___SYNC)
     return __sync_fetch_and_add(p, 1) + 1;
 #elif defined(WIN32)
-    return InterlockedIncrement64(p);
+    return InterlockedIncrement(p);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedIncrement((volatile int32_t *)p);
 #elif defined(HAVE_PTHREAD)
     uint32_t v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -83,6 +86,8 @@ atomic_dec_32_nv(volatile uint32_t *p)
     return __sync_fetch_and_sub(p, 1) - 1;
 #elif defined(WIN32)
     return InterlockedDecrement(p);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedDecrement((volatile int32_t *)p);
 #elif defined(HAVE_PTHREAD)
     uint32_t v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -103,6 +108,8 @@ atomic_inc_64_nv(volatile uint64_t *p)
     return __sync_fetch_and_add(p, 1) + 1;
 #elif defined(WIN32)
     return InterlockedIncrement64(p);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedIncrement64((volatile int64_t *)p);
 #elif defined(HAVE_PTHREAD)
     uint64_t v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -122,7 +129,9 @@ atomic_dec_64_nv(volatile uint64_t *p)
 #elif defined(HAVE___SYNC)
     return __sync_fetch_and_sub(p, 1) - 1;
 #elif defined(WIN32)
-    return InterlockedDecrement(p);
+    return InterlockedDecrement64(p);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedDecrement64((volatile int64_t *)p);
 #elif defined(HAVE_PTHREAD)
     uint64_t v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -145,6 +154,8 @@ atomic_cas_ptr(volatile void **p, void *oldval, void *newval)
     return __sync_val_compare_and_swap((void **)/*drop volatile*/p, oldval, newval);
 #elif defined(WIN32)
     return InterlockedCompareExchangePointer(p, newval, oldval);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedCompareExchangePointer(p, newval, oldval);
 #elif defined(HAVE_PTHREAD)
     volatile void *v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -171,6 +182,8 @@ atomic_cas_32(volatile uint32_t *p, uint32_t oldval, uint32_t newval)
     return __sync_val_compare_and_swap(p, oldval, newval);
 #elif defined(WIN32)
     return InterlockedCompareExchange32(p, newval, oldval);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedCompareExchange(p, newval, oldval);
 #elif defined(HAVE_PTHREAD)
     uint32_t v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -197,6 +210,8 @@ atomic_cas_64(volatile uint64_t *p, uint64_t oldval, uint64_t newval)
     return __sync_val_compare_and_swap(p, oldval, newval);
 #elif defined(WIN32)
     return InterlockedCompareExchange64(p, newval, oldval);
+#elif defined(HAVE_INTEL_INTRINSICS)
+    return _InterlockedCompareExchange64(p, newval, oldval);
 #elif defined(HAVE_PTHREAD)
     uint64_t v;
     (void) pthread_mutex_lock(&atomic_lock);
@@ -257,7 +272,7 @@ atomic_read_32(volatile uint32_t *p)
 }
 
 uint64_t
-atomic_read_64(volatile uint32_t *p)
+atomic_read_64(volatile uint64_t *p)
 {
 #ifdef HAVE___ATOMIC
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
@@ -370,5 +385,3 @@ atomic_write_64(volatile uint64_t *p, uint64_t v)
     return (void *)/*drop volatile*/*p;
 #endif
 }
-
-#endif
