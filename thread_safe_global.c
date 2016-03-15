@@ -1148,13 +1148,20 @@ value_binary_search(struct value **seen, size_t min, size_t max, struct value *v
  * want to allocate enough bytes to blow the stack.
  */
 static void
-ensure_alloca(size_t bytes)
+ensure_alloca(size_t bytes, int *p)
 {
     int strack_grows_down;
     size_t i;
-    volatile char *mem = alloca(bytes);
+    volatile char *mem;
 
-    strack_grows_down = &mem[bytes - 1] < &mem[0];
+    if (p == NULL) {
+        ensure_alloca(bytes, &strack_grows_down);
+        return;
+    }
+
+    strack_grows_down = (p < &strack_grows_down);
+
+    mem = alloca(bytes);
     for (i = 0; i < bytes; i += 4096) {
         if (strack_grows_down)
             ((char *)mem)[bytes - i] = 0;
