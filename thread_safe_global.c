@@ -1143,32 +1143,64 @@ value_binary_search(struct value **seen, size_t min, size_t max, struct value *v
     return seen[mid];
 }
 
+
+#if __STDC_VERSION__ < 199901L
 /*
  * Make alloca() safe by tripping any guard page if there is one and we
  * want to allocate enough bytes to blow the stack.
  */
-static void
+static int
 ensure_alloca(size_t bytes, int *p)
 {
-    int strack_grows_down;
+    int stack_grows_down;
     size_t i;
-    volatile char *mem;
+    volatile char *mem; /* volatile so we're not optimized away */
 
-    if (p == NULL) {
-        ensure_alloca(bytes, &strack_grows_down);
-        return;
-    }
+    /*
+     * Detect stack growth direction.  This is a tiny optimization.  We
+     * could just write to the first and last byte of each alloca()
+     * alocation done below instead, then we'd not need to know when way
+     * the stack grows.
+     */
+    if (p == NULL)
+        return ensure_alloca(bytes, &stack_grows_down);
+    stack_grows_down = (p > &stack_grows_down);
 
-    strack_grows_down = (p < &strack_grows_down);
-
-    mem = alloca(bytes);
-    for (i = 0; i < bytes; i += 4096) {
-        if (strack_grows_down)
-            ((char *)mem)[bytes - i] = 0;
-        else
-            ((char *)mem)[i] = 0;
-    }
+    /*
+     * Allocate bytes in page-sized chunks.  Allocating them all at once
+     * would cause any not-on-alt-stack handler for a SEGFAULT tripped
+     * here to execute wherever sp + bytes might be, which may be valid
+     * memory but which would not be on this stack.
+     */
+    for (i = 0; i < bytes; i += 4096)
+        (mem = (volatile char *)alloca(4096))[stack_grows_down ? 0 : 4095] = 0;
+    return 0;
 }
+#else
+/* C99 VLA version of ensure_alloca() */
+static
+int
+ensure_alloca(size_t bytes, char *p)
+{
+    char stack_grows_down;
+    size_t i;
+
+    if (p == 0)
+        return ensure_alloca(bytes, &stack_grows_down);
+    stack_grows_down = (p > &stack_grows_down);
+
+    for (i = 0; i < bytes; i += 4096) {
+        /*
+         * This goes out of scope every go around, thus the need to grow
+         * the VLA size ever bigger.  Compare to the alloca() version
+         * above.
+         */
+        volatile char a[stack_grows_down ? i : bytes - i];
+        a[stack_grows_down ? 0 : bytes - i + 4095] = 0;
+    }
+    return 0;
+}
+#endif
 
 #define SAFE_ALLOCA(bytes) (ensure_alloca(bytes), alloca(bytes))
 
