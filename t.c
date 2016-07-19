@@ -157,7 +157,7 @@ main()
     while (atomic_cas_32(&nthreads, 0, 0) > 0) {
         if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
             err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
-        if (nthreads == NREADERS) {
+        if (atomic_cas_32(&nthreads, 0, 0) == NREADERS) {
             if ((errno = pthread_var_set_np(var, magic_exit, &last_version)) != 0)
                 err(1, "pthread_var_set_np failed");
             printf("\nTold readers to exit.\n");
@@ -212,7 +212,7 @@ main()
         while (atomic_cas_32(&nthreads, 0, 0) > 0) {
             if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
                 err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
-            if (nthreads == NREADERS) {
+            if (atomic_cas_32(&nthreads, 0, 0) == NREADERS) {
                 if ((errno = pthread_var_set_np(var, magic_exit, &last_version)) != 0)
                     err(1, "pthread_var_set_np failed");
                 printf("\nTold readers to exit.\n");

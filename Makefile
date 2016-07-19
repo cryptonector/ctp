@@ -27,7 +27,7 @@ CPPDEFS =
 CPPFLAGS = $(ATOMICS_BACKEND) $(TSGV_IMPLEMENTATION)
 CFLAGS = -fPIC $(CDBGFLAG) $(COPTFLAG) $(CWARNFLAGS) $(CPPFLAGS) $(CPPDEFS)
 
-LDLIBS = -lpthread #(but not on Windows, natch)
+LDLIBS = -lpthread -lrt #(but not on Windows, natch)
 LDFLAGS = 
 
 slotpair : TSGV_IMPLEMENTATION = -DUSE_TSGV_SLOT_PAIR_DESIGN
