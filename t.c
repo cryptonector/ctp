@@ -378,7 +378,9 @@ reader(void *data)
             err(1, "pthread_var_get_np(var) failed");
 
         if (version < last_version)
-            err(1, "version went backwards for this reader!");
+            err(1, "version went backwards for this reader! "
+                "new version is %jd, previous is %jd",
+                version, last_version);
         last_version = version;
         assert(version == 0 || p != 0);
         if (*(uint64_t *)p == MAGIC_EXIT)
@@ -492,7 +494,9 @@ writer(void *data)
         if ((errno = pthread_var_set_np(var, p, &version)) != 0)
             err(1, "pthread_var_set_np(var) failed");
         if (version < last_version)
-            err(1, "version went backwards for this writer!");
+            err(1, "version went backwards for this writer! "
+                "new version is %jd, previous is %jd",
+                version, last_version);
         last_version = version;
         (*(runs[thread_num]))++;
         wruns++;
