@@ -1239,7 +1239,9 @@ mark_values(pthread_var_np_t vp)
      * luck, this is more like O(N) than like O(N log(N))
      */
     vp->values->referenced = 1; /* curr value is always in use */
-    for (i = 0, slots = vp->slots; i < max_slot; i++) {
+    for (i = 0, slots = atomic_read_ptr((volatile void **)vp->slots);
+         i < max_slot;
+         i++) {
         assert(slots != NULL);
         assert(i <= slots->slot_base + slots->slot_count);
         if (i == slots->slot_base + slots->slot_count) {
