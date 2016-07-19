@@ -737,8 +737,8 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     struct slots *new_slots;
 
     for (slotsp = &vp->slots;
-         atomic_read_ptr(slotsp) != NULL;
-         slotsp = &((struct slots *)atomic_read_ptr(slotsp))->next)
+         atomic_read_ptr((volatile void **)slotsp) != NULL;
+         slotsp = &((struct slots *)atomic_read_ptr((volatile void **)slotsp))->next)
         nslots += (*slotsp)->slot_count;
 
     if (nslots > slot_idx)
@@ -1197,12 +1197,13 @@ ensure_alloca(size_t bytes, char *p)
          */
         volatile char a[stack_grows_down ? i : bytes - i];
         a[stack_grows_down ? 0 : bytes - i + 4095] = 0;
+        a[stack_grows_down ? 0 : bytes - i + 4095];
     }
     return 0;
 }
 #endif
 
-#define SAFE_ALLOCA(bytes) (ensure_alloca(bytes), alloca(bytes))
+#define SAFE_ALLOCA(bytes) (ensure_alloca(bytes, NULL), alloca(bytes))
 
 /* Mark half of mark-and-sweep GC */
 static struct value *
