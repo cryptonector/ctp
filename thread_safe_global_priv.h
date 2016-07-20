@@ -135,10 +135,10 @@ struct pthread_var_np {
 
 /* This is an element on the list of referenced values */
 struct value {
-    struct value        *next;          /* previous (still ref'd) value */
-    void                *value;         /* actual value */
-    uint64_t            version;        /* version number */
-    uint32_t            referenced;     /* for mark and sweep */
+    volatile struct value   *next;      /* previous (still ref'd) value */
+    void                    *value;     /* actual value */
+    volatile uint64_t       version;    /* version number */
+    volatile uint32_t       referenced; /* for mark and sweep */
 };
 
 /*
@@ -146,9 +146,9 @@ struct value {
  * of these.
  */
 struct slot {
-    struct value        *value;         /* reference to last value read */
-    uint32_t            in_use;         /* atomic */
-    pthread_var_np_t    vp;             /* for cleanup from thread key dtor */
+    volatile struct value       *value; /* reference to last value read */
+    volatile uint32_t           in_use; /* atomic */
+    pthread_var_np_t            vp;     /* for cleanup from thread key dtor */
     /* We could add a pthread_t here */
 };
 
@@ -157,23 +157,23 @@ struct slot {
  * array.
  */
 struct slots {
-    struct slots        *next;          /* atomic */
-    struct slot         *slot_array;    /* atomic */
-    uint32_t            slot_count;     /* atomic */
-    uint32_t            slot_base;      /* logical index of slot_array[0] */
+    volatile struct slots   *next;      /* atomic */
+    struct slot             *slot_array;/* atomic */
+    volatile uint32_t       slot_count; /* atomic */
+    uint32_t                slot_base;  /* logical index of slot_array[0] */
 };
 
 struct pthread_var_np {
-    pthread_key_t       tkey;           /* to detect thread exits */
-    pthread_mutex_t     write_lock;     /* one writer at a time */
-    pthread_mutex_t     waiter_lock;    /* to signal waiters */
-    pthread_cond_t      waiter_cv;      /* to signal waiters */
-    var_dtor_t          dtor;           /* value destructor */
-    struct value        *values;        /* atomic ref'd value list head */
-    struct slots        *slots;         /* atomic reader subscription slots */
-    uint32_t            next_slot_idx;  /* atomic index of next new slot */
-    uint32_t            slots_in_use;   /* atomic count of live readers */
-    uint32_t            nvalues;        /* writer-only; for housekeeping */
+    pthread_key_t           tkey;           /* to detect thread exits */
+    pthread_mutex_t         write_lock;     /* one writer at a time */
+    pthread_mutex_t         waiter_lock;    /* to signal waiters */
+    pthread_cond_t          waiter_cv;      /* to signal waiters */
+    var_dtor_t              dtor;           /* value destructor */
+    volatile struct value   *values;        /* atomic ref'd value list head */
+    volatile struct slots   *slots;         /* atomic reader subscription slots */
+    volatile uint32_t       next_slot_idx;  /* atomic index of next new slot */
+    volatile uint32_t       slots_in_use;   /* atomic count of live readers */
+    uint32_t                nvalues;        /* writer-only; for housekeeping */
 };
 
 #endif

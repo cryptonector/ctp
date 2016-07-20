@@ -353,6 +353,7 @@ reader(void *data)
     uint64_t version;
     uint64_t last_version = 0;
     uint64_t rruns = 0;
+    int first = 1;
     void *p;
 
     runs[thread_num] = calloc(1, sizeof(runs[0]));
@@ -395,6 +396,12 @@ reader(void *data)
         rruns++;
         if (rruns % 20 == 0 && us > 0)
             (void) write(1, ".", sizeof(".")-1);
+
+        if (first) {
+            printf("(%d)", thread_num);
+            fflush(stdout);
+            first = 0;
+        }
         usleep(us);
     }
 
@@ -429,6 +436,7 @@ idle_reader(void *data)
     uint64_t version;
     uint64_t i;
     void *p;
+    int first = 1;
 
     if (clock_gettime(CLOCK_MONOTONIC, &idlestarttimes[thread_num]) != 0)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
@@ -436,6 +444,12 @@ idle_reader(void *data)
     for (i = idleruns[thread_num]; i > 0; i--) {
         if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
             err(1, "pthread_var_get_np(var) failed");
+
+        if (first) {
+            printf("(%d)", thread_num);
+            fflush(stdout);
+            first = 0;
+        }
     }
 
     if (clock_gettime(CLOCK_MONOTONIC, &idleendtimes[thread_num]) != 0)

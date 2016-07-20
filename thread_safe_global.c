@@ -657,7 +657,8 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
  * array is maintained as a linked list of array chunks; when a reader
  * goes to grow it, it will either win a race to grow it or lose it,
  * using an atomic CAS operation to perform the growth; losers free
- * their chunk and then find their slot in the winner's chunk.
+ * their chunk and then look for their slot in the winner's chunk and
+ * possibly retry the array growth operation.
  *
  * Once subcribed, readers only ever do an acquire-fenced read on the
  * head of the linked list of values, and write that to their slot with
@@ -727,11 +728,10 @@ get_slot(pthread_var_np_t vp, uint32_t slot_idx)
 static int
 grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
 {
-    uint32_t would_be_nslots;
     uint32_t nslots = 0;
     uint32_t additions;
     uint32_t i;
-    struct slots **slotsp;
+    volatile struct slots **slotsp;
     struct slots *new_slots;
 
     for (slotsp = &vp->slots;
@@ -749,7 +749,6 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
         return errno;
 
     additions = (nslots == 0) ? 4 : nslots + nslots / 2;
-    would_be_nslots = nslots + additions;
     while (nslots + additions < slot_idx) {
         /*
          * In this case we're racing with other readers to grow the slot
@@ -760,8 +759,7 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
          * There's always a winner, so eventually we won't need to try
          * again.
          */
-        additions += would_be_nslots + would_be_nslots / 2;
-        would_be_nslots += would_be_nslots + would_be_nslots / 2;
+        additions += additions + additions / 2;
         tries++;
     }
     assert(slot_idx - nslots < additions);
@@ -798,7 +796,8 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
     /*
      * If we won the race to grow the array then the index we wanted is
      * guaranteed to be present and recursing here is cheap.  If we lost
-     * the race we need to retry.
+     * the race we need to retry.  We could goto the top of the function
+     * though, just in case there's no tail call optimization.
      */
     return grow_slots(vp, slot_idx, tries - 1);
 }
@@ -816,14 +815,14 @@ destroy_var(pthread_var_np_t vp)
     pthread_mutex_lock(&vp->write_lock);
 
     while (vp->values != NULL) {
-        val = vp->values;
+        val = atomic_read_ptr((volatile void **)&vp->values);
         vp->values = val->next;
         if (vp->dtor != NULL)
             vp->dtor(val->value);
         free(val);
     }
     while (vp->slots != NULL) {
-        slots = vp->slots;
+        slots = atomic_read_ptr((volatile void **)&vp->slots);
         vp->slots = slots->next;
         free(slots->slot_array);
         free(slots);
@@ -968,9 +967,9 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
 
     if ((slot = pthread_getspecific(vp->tkey)) == NULL) {
         /* First time for this thread -> O(N) slow path (subscribe thread) */
+        slot_idx = atomic_inc_32_nv(&vp->next_slot_idx) - 1;
         if ((slot = get_free_slot(vp)) == NULL) {
             /* Slower path still: grow slots array list */
-            slot_idx = atomic_inc_32_nv(&vp->next_slot_idx) - 1;
             err = grow_slots(vp, slot_idx, 2);  /* O(log N) */
             assert(err == 0);
             slot = get_slot(vp, slot_idx);      /* O(N) */
@@ -1006,12 +1005,13 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
      * the loop condition and the body.  The writer has to jump through
      * some hoops to deal with this.
      */
-    while (slot->value != (newest = atomic_read_ptr((volatile void **)&vp->values)))
+    while (atomic_read_ptr((volatile void **)&slot->value) !=
+           (newest = atomic_read_ptr((volatile void **)&vp->values)))
         atomic_write_ptr((volatile void **)&slot->value, newest);
 
-    if (slot->value != NULL) {
-        *res = slot->value->value;
-        *version = slot->value->version;
+    if (newest != NULL) {
+        *res = newest->value;
+        *version = newest->version;
     }
 
     return 0;
@@ -1035,7 +1035,7 @@ pthread_var_release_np(pthread_var_np_t vp)
     atomic_write_32(&slot->in_use, 0);
 }
 
-static struct value *mark_values(pthread_var_np_t);
+static volatile struct value *mark_values(pthread_var_np_t);
 
 /**
  * Set new data on a thread-safe global variable
@@ -1051,8 +1051,8 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
                      uint64_t *new_version)
 {
     struct value *new_value;
-    struct value *old_values = NULL;
-    struct value *value;
+    volatile struct value *old_values = NULL;
+    volatile struct value *value;
     uint64_t vers;
     int err;
 
@@ -1074,7 +1074,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
      */
 
     new_value->value = data;
-    new_value->next = vp->values;
+    new_value->next = atomic_read_ptr((volatile void **)&vp->values);
     if (new_value->next == NULL)
         new_value->version = 1;
     else
@@ -1111,7 +1111,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
         if (vp->dtor)
             vp->dtor(value->value);
         old_values = value->next;
-        free(value);
+        free((void *)value);
     }
     return err;
 }
@@ -1148,25 +1148,32 @@ value_binary_search(volatile struct value **seen, size_t min, size_t max, volati
 }
 
 /* Mark half of mark-and-sweep GC */
-static struct value *
+static volatile struct value *
 mark_values(pthread_var_np_t vp)
 {
-    struct value **old_values_array;
-    struct value **p;
-    struct value *old_values = NULL;
-    struct value *v;
-    struct value *seen;
-    struct slots *slots;
+    volatile struct value **old_values_array;
+    volatile struct value * volatile *p;
+    volatile struct value *old_values = NULL;
+    volatile struct value *v, *v2;
+    volatile struct slots *slots;
     struct slot *slot;
     size_t i;
 
     old_values_array = calloc(vp->nvalues, sizeof(old_values_array[0]));
 
-    for (i = 0, v = vp->values; i < vp->nvalues && v != NULL; v = v->next, i++)
+    /*
+     * XXX There should be no need to atomically read vp->values here,
+     * as we are the writer and hold a lock.
+     */
+    for (i = 0, v = atomic_read_ptr((volatile void **)&vp->values);
+         i < vp->nvalues && v != NULL;
+         v = v->next, i++)
         old_values_array[i] = v;
     assert(i == vp->nvalues && v == NULL);
     qsort(old_values_array, vp->nvalues, sizeof(old_values_array[0]),
           value_cmp);
+    for (i = 1; i < vp->nvalues; i++)
+        assert(old_values_array[i-1] < old_values_array[i]);
 
     /*
      * Mark. This is O(N log(N)) where N is the number of subscribed
@@ -1219,6 +1226,9 @@ mark_values(pthread_var_np_t vp)
             v->referenced = 1;
             continue;
         }
+
+        for (v2 = vp->values; v2 != NULL; v2 = v2->next)
+            assert(v2 != v);
     }
     free(old_values_array);
 
@@ -1236,7 +1246,7 @@ mark_values(pthread_var_np_t vp)
             old_values = v;
             vp->nvalues--;
 
-            /* Mark the remainder of the list */
+            /* Sweep the remainder of the list */
             continue;
         }
 
