@@ -66,17 +66,9 @@ timeadd(struct timespec a, struct timespec b)
 {
     struct timespec r;
 
-    assert(a.tv_nsec >= 0 && a.tv_nsec < 1000000000);
-    assert(b.tv_nsec >= 0 && b.tv_nsec < 1000000000);
-    a.tv_nsec %= 1000000000;
-    b.tv_nsec %= 1000000000;
-    r.tv_sec = a.tv_sec + b.tv_sec;
-    r.tv_nsec = a.tv_nsec + b.tv_nsec;
-    if (r.tv_nsec > 1000000000) {
-        r.tv_sec++;
-        r.tv_nsec -= 1000000000;
-    }
-    assert(r.tv_nsec >= 0 && r.tv_nsec < 1000000000);
+    r.tv_sec = a.tv_sec + b.tv_sec +
+        (a.tv_nsec + b.tv_nsec) / 1000000000;
+    r.tv_nsec = (a.tv_nsec + b.tv_nsec) % 1000000000;
     return r;
 }
 
