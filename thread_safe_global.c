@@ -749,7 +749,7 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
         return errno;
 
     additions = (nslots == 0) ? 4 : nslots + nslots / 2;
-    while (nslots + additions < slot_idx) {
+    while (slot_idx >= nslots + additions) {
         /*
          * In this case we're racing with other readers to grow the slot
          * list, but if we lose the race then our slot_idx may not be
