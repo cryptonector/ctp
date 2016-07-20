@@ -1119,26 +1119,32 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
 int
 value_cmp(const void *a, const void *b)
 {
-    return a < b ? -1 : (a == b ? 0 : 1);
+    if (*(const struct value **)a < *(const struct value **)b)
+        return -1;
+    if (*(const struct value **)a > *(const struct value **)b)
+        return 1;
+    return 0;
 }
 
-struct value *
-value_binary_search(struct value **seen, size_t min, size_t max, struct value *v)
+volatile struct value *
+value_binary_search(volatile struct value **seen, size_t min, size_t max, volatile struct value *v)
 {
     size_t mid;
 
-    if (max <= min + 1) {
-        if (max == min + 1 && seen[min] == v)
-            return seen[min];
+    if (max <= min)
+        return NULL;
+    if (max == min + 1) {
+        if (seen[min] == v)
+            return v;
         return NULL;
     }
 
     mid = min + ((max - min) >> 1);
     if (seen[mid] < v)
-        return value_binary_search(seen, min, mid, v);
+        return value_binary_search(seen, mid, max, v); /* search right */
     if (seen[mid] > v)
-        return value_binary_search(seen, mid, max, v);
-    return seen[mid];
+        return value_binary_search(seen, min, mid, v); /* search left */
+    return v;
 }
 
 /* Mark half of mark-and-sweep GC */
@@ -1152,7 +1158,6 @@ mark_values(pthread_var_np_t vp)
     struct value *seen;
     struct slots *slots;
     struct slot *slot;
-    uint32_t max_slot;
     size_t i;
 
     old_values_array = calloc(vp->nvalues, sizeof(old_values_array[0]));
@@ -1164,52 +1169,55 @@ mark_values(pthread_var_np_t vp)
           value_cmp);
 
     /*
-     * Find the index of the largest slot (*after* publishing the new value).
-     *
-     * Any new readers past max_slot will be reading the newly-published
-     * value, thus we don't need to consider them.
-     */
-    max_slot = atomic_read_32(&vp->next_slot_idx);
-
-    /*
      * Mark. This is O(N log(N)) where N is the number of subscribed
      * threads, but with the optimizations below, and with a bit of
      * luck, this is more like O(N) than like O(N log(N))
      */
     vp->values->referenced = 1; /* curr value is always in use */
-    for (i = 0, slots = atomic_read_ptr((volatile void **)vp->slots);
-         i < max_slot;
+
+    for (i = 0, slots = atomic_read_ptr((volatile void **)&vp->slots);
+         slots != NULL;
          i++) {
         assert(slots != NULL);
+        assert(i >= slots->slot_base);
         assert(i <= slots->slot_base + slots->slot_count);
         if (i == slots->slot_base + slots->slot_count) {
             slots = slots->next;
-            assert(slots != NULL && slots->slot_count > 0);
+            if (slots == NULL)
+                break;
         }
+        assert(slots->slot_count > 0);
+        assert(i >= slots->slot_base);
+        assert(i < slots->slot_base + slots->slot_count);
         slot = &slots->slot_array[i - slots->slot_base];
-        if ((v = atomic_read_ptr((volatile void **)&slot->value)) != NULL &&
-            /*
-             * Optimization: ignore slots referring to current value,
-             * since we've already marked that as referenced.
-             */
-            v != vp->values) {
+        v = atomic_read_ptr((volatile void **)&slot->value);
 
-            /*
-             * We can't just dereference v->value->referenced because
-             * there's a window in the get-side where we can set the
-             * slot's value to an immediately-after free()'ed value, and
-             * we could be seeing such a value, which means we can't
-             * dereference it.
-             *
-             * Instead we search for v in the old_values_array[].
-             */
+        /*
+         * Optimization: ignore slots with a NULL value.  The owner of
+         * that slot may be about to write a value that we're about to
+         * free, but they will notice that multiple writers went by and
+         * re-read vp->value.
+         *
+         * Also ignore slots with the current value.
+         */
+        if (v == NULL || v == vp->values)
+            continue;
 
-            /* Optimization: also don't search array for vp->values->next */
-            if (v == vp->values->next)
-                vp->values->next->referenced = 1;
-            else if ((seen = value_binary_search(old_values_array, 0,
-                                                 vp->nvalues, v)) != NULL)
-                seen->referenced = 1;
+        /*
+         * We can't just dereference v->referenced because there's a
+         * window in the get-side where we can set the slot's value to
+         * an immediately-after free()'ed value, and we could be seeing
+         * such a value, which means we can't dereference it.
+         *
+         * Instead we search for v in the old_values_array[].  If it's
+         * found then it's safe to write to v->referenced because it is
+         * stable through the execution of this function and won't be
+         * free()'ed until after.
+         */
+        if ((value_binary_search(old_values_array, 0,
+                                 vp->nvalues, v)) != NULL) {
+            v->referenced = 1;
+            continue;
         }
     }
     free(old_values_array);
@@ -1219,21 +1227,21 @@ mark_values(pthread_var_np_t vp)
         v = *p;
 
         if (!v->referenced) {
-            /* Remove from list */
             assert(v != vp->values);
+
+            /* Remove from list and setup to continue at v->next */
             *p = v->next;
+            /* Prepend v to old_values list */
             v->next = old_values;
             old_values = v;
             vp->nvalues--;
 
-            /* Sweep new [sub-]list */
+            /* Mark the remainder of the list */
             continue;
         }
 
-        /* Clear */
-        v->referenced = 0;
-
         /* Step into this value's next sub-list */
+        v->referenced = 0;
         p = &v->next;
         assert(p != &vp->values);
     }
