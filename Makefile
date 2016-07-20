@@ -10,6 +10,7 @@ endif
 
 COPTFLAG = -O0
 CDBGFLAG = -ggdb3
+CSANFLAG = -fsanitize=address -fsanitize=undefined
 
 # Atomics backends: -DHAVE___ATOMIC,
 # 		    -DHAVE___SYNC,
@@ -25,10 +26,10 @@ TSGV_IMPLEMENTATION =
 
 CPPDEFS = 
 CPPFLAGS = $(ATOMICS_BACKEND) $(TSGV_IMPLEMENTATION)
-CFLAGS = -fPIC $(CDBGFLAG) $(COPTFLAG) $(CWARNFLAGS) $(CPPFLAGS) $(CPPDEFS)
+CFLAGS = -fPIC $(CSANFLAG) $(CDBGFLAG) $(COPTFLAG) $(CWARNFLAGS) $(CPPFLAGS) $(CPPDEFS)
 
-LDLIBS = -lpthread -lrt #(but not on Windows, natch)
-LDFLAGS = 
+LDLIBS =  -lpthread -lrt #(but not on Windows, natch)
+LDFLAGS =
 
 slotpair : TSGV_IMPLEMENTATION = -DUSE_TSGV_SLOT_PAIR_DESIGN
 slotpair : t
@@ -55,14 +56,14 @@ slotlistO3 : COPTFLAG = -O3
 slotlistO3 : slotlist
 
 .c.o:
-	$(CC) -pie $(CFLAGS) -c $<
+	$(CC) $(CFLAGS) -c $<
 
 # XXX Add mapfile, don't export atomics
 libtsgv.so: thread_safe_global.o atomics.o
-	$(LD) -shared -o libtsgv.so $^
+	$(CC) $(CSANFLAG) -shared -o libtsgv.so $(LDFLAGS) $(LDLIBS) $^
 
-t: t.o thread_safe_global.o atomics.o
-	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+t: t.o libtsgv.so
+	$(CC) $(CSANFLAG) -pie -o $@ $^ $(LDFLAGS) $(LDLIBS) -Wl,-rpath,$(PWD) -L$(PWD) -ltsgv
 
 clean:
 	rm -f t t.o libtsgv.so thread_safe_global.o atomics.o
