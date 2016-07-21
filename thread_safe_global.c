@@ -1127,24 +1127,23 @@ value_cmp(const void *a, const void *b)
 }
 
 volatile struct value *
-value_binary_search(volatile struct value **seen, size_t min, size_t max, volatile struct value *v)
+value_binary_search(volatile struct value **seen, size_t n, volatile struct value *v)
 {
-    size_t mid;
+    size_t left = 0;
 
-    if (max <= min)
-        return NULL;
-    if (max == min + 1) {
-        if (seen[min] == v)
-            return v;
-        return NULL;
+    while (n > left) {
+        size_t mid;
+
+        /* Two or more array elements */
+        mid = (left + n - 1) >> 1;
+        if (seen[mid] < v)
+            left = mid + 1; /* search right */
+        else if (seen[mid] > v)
+            n = mid;        /* search left */
+        else
+            return v; /* seen[mid] == v -> so we found v */
     }
-
-    mid = min + ((max - min) >> 1);
-    if (seen[mid] < v)
-        return value_binary_search(seen, mid, max, v); /* search right */
-    if (seen[mid] > v)
-        return value_binary_search(seen, min, mid, v); /* search left */
-    return v;
+    return NULL;
 }
 
 /* Mark half of mark-and-sweep GC */
@@ -1172,6 +1171,7 @@ mark_values(pthread_var_np_t vp)
     assert(i == vp->nvalues && v == NULL);
     qsort(old_values_array, vp->nvalues, sizeof(old_values_array[0]),
           value_cmp);
+    /* Assert that qsort() sorted */
     for (i = 1; i < vp->nvalues; i++)
         assert(old_values_array[i-1] < old_values_array[i]);
 
@@ -1221,9 +1221,9 @@ mark_values(pthread_var_np_t vp)
          * stable through the execution of this function and won't be
          * free()'ed until after.
          */
-        if ((value_binary_search(old_values_array, 0,
+        if ((value_binary_search(old_values_array,
                                  vp->nvalues, v)) != NULL) {
-            v->referenced = 1;
+            v->referenced = 1;  /* so v is valid, safe to deref */
             continue;
         }
 
