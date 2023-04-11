@@ -40,59 +40,51 @@
  *    implementations below readers never block, not even on uncontended
  *    resources)
  *  - readers do not starve writers; writers do not block readers
- *
- * Two different implementations are provided here.  See the private
- * header and commentary below.
  */
 
-/*
- * TODO:
- *
- *  - Write a test program using read-write locks instead of this API so
- *    we can compare performance for the two.
- *
- *  - Use a single global thread-specific key, not a per-variable one.
- *
- *    This is important as otherwise we leak thread-specific keys.  But
- *    only mildly important: there will be a small number of thread-safe
- *    global variables in use anyways -- a number comparable to thread
- *    keys.
- *
- *  - Add a getter that gets the last value read, rather than the
- *    current value of the thread-safe global variable.
- *
- *  - Rename / add option to rename all the symbols to avoid using the
- *    pthread namespace.
- */
-
-#ifdef HAVE_PTHREAD_YIELD
-#define _GNU_SOURCE
-#endif
-
+#include <sys/types.h>
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef HAVE_PTHREAD_YIELD
-#define yield() pthread_yield()
-#else
-#ifdef HAVE_SCHED_YIELD
-#include <sched.h>
-#define yield() sched_yield()
-#else
-#ifdef HAVE_YIELD
-#include <unistd.h>
-#endif /* HAVE_YIELD */
-#endif /* HAVE_SCHED_YIELD */
-#endif /* HAVE_PTHREAD_YIELD */
-
-#include "thread_safe_global_priv.h"
 #include "thread_safe_global.h"
 #include "atomics.h"
 
-#ifdef USE_TSGV_SLOT_PAIR_DESIGN
+#if defined(USE_TSV_SLOT_PAIR_DESIGN) && defined(USE_TSV_SUBSCRIPTION_SLOTS_DESIGN)
+#error "Must define only one of USE_TSV_SLOT_PAIR_DESIGN or USE_TSV_SUBSCRIPTION_SLOTS_DESIGN"
+#endif
+
+#if !defined(USE_TSV_SLOT_PAIR_DESIGN) && !defined(USE_TSV_SUBSCRIPTION_SLOTS_DESIGN)
+#define USE_TSV_SLOT_PAIR_DESIGN
+#endif
+
+typedef thread_safe_var_dtor_f var_dtor_t;
+
+#ifdef USE_TSV_SLOT_PAIR_DESIGN
+/*
+ * There are two designs, but one of them is ommited here.
+ *
+ * See https://github.com/nicowilliams/ctp
+ */
+
+/*
+ * This implements a thread-safe variable.  A thread can read it, and the
+ * value it reads will be safe to continue using until it reads it again.
+ *
+ * Properties:
+ *
+ *  - writers are serialized
+ *  - readers are fast, rarely doing blocking operations, and when they
+ *    do, not blocking on contended resources (in one of two
+ *    implementations below readers never block, not even on uncontended
+ *    resources)
+ *  - readers do not starve writers; writers do not block readers
+ *
+ */
+
 /*
  * The design for this implementation uses a pair of slots such that one
  * has a current value for the variable, and the other holds the
@@ -137,7 +129,62 @@
  *            modified with an atomic operation.  This is to ensure
  *            memory visibility rules (see above), though we may be
  *            trying much too hard in some cases.
+ *
+ *            The atomic operations from atomics.[ch] provide the necessary
+ *            barriers.
  */
+
+/*
+ * This design uses a pair of "slots", such that one holds the current value of
+ * the thread-safe global variable, while the other holds the previous/next
+ * value.
+ *
+ * Writers make the previous slot into the new current slot, being careful not
+ * to step on the toes of a reader that was reading from that slot thinking it
+ * was the current slot.
+ *
+ * Readers are lock-less, except that when a reader is the last reader of a
+ * slot it has to signal a writer that might be waiting for that reader to be
+ * done with the slot.  Also, readers do call free(), which may acquire locks.
+ * Sending that signal requires taking a lock that the writer will have dropped
+ * in order to wait, thus it should be an uncontended lock, and if the reader
+ * blocks racing with a writer, it should unblock very soon after.  This is
+ * never needed when the value has not changed since the previous read.
+ *
+ * Both, reading, and writing are O(1).
+ */
+
+/*
+ * Values set on a thread-global variable are wrapped with a struct that
+ * holds a reference count.
+ */
+struct vwrapper {
+    var_dtor_t          dtor;       /* value destructor */
+    void                *ptr;       /* the actual value */
+    uint64_t            version;    /* version of this data */
+    volatile uint32_t   nref;       /* release when drops to 0 */
+};
+
+/* This is a slot.  There are two of these. */
+struct var {
+    struct vwrapper     *wrapper;   /* wraps real ptr, has nref */
+    struct var          *other;     /* always points to the other slot */
+    uint64_t            version;    /* version of this slot's data */
+    volatile uint32_t   nreaders;   /* no. of readers active in this slot */
+};
+
+struct thread_safe_var_s {
+    pthread_key_t       tkey;           /* to detect thread exits */
+    pthread_mutex_t     write_lock;     /* one writer at a time */
+    pthread_mutex_t     waiter_lock;    /* to signal waiters */
+    pthread_cond_t      waiter_cv;      /* to signal waiters */
+    pthread_mutex_t     cv_lock;        /* to signal waiting writer */
+    pthread_cond_t      cv;             /* to signal waiting writer */
+    struct var          vars[2];        /* the two slots */
+    var_dtor_t          dtor;           /* both read this */
+    uint64_t            next_version;   /* both read; writer writes */
+};
+
 
 static void
 wrapper_free(struct vwrapper *wrapper)
@@ -175,10 +222,10 @@ var_dtor_wrapper(void *wrapper)
  * @return Returns zero on success, else a system error number
  */
 int
-pthread_var_init_np(pthread_var_np_t *vpp,
-                    pthread_var_destructor_np_t dtor)
+thread_safe_var_init(thread_safe_var *vpp,
+                     thread_safe_var_dtor_f dtor)
 {
-    pthread_var_np_t vp;
+    thread_safe_var vp;
     int err;
 
     *vpp = NULL;
@@ -197,29 +244,29 @@ pthread_var_init_np(pthread_var_np_t *vpp,
      * realloc()'ed as needed).
      */
     if ((err = pthread_key_create(&vp->tkey, var_dtor_wrapper)) != 0) {
-        memset(vp, 0, sizeof(*vp));
+        free(vp);
         return err;
     }
     if ((err = pthread_mutex_init(&vp->write_lock, NULL)) != 0) {
-        memset(vp, 0, sizeof(*vp));
+        free(vp);
         return err;
     }
     if ((err = pthread_mutex_init(&vp->waiter_lock, NULL)) != 0) {
         pthread_mutex_destroy(&vp->write_lock);
-        memset(vp, 0, sizeof(*vp));
+        free(vp);
         return err;
     }
     if ((err = pthread_mutex_init(&vp->cv_lock, NULL)) != 0) {
         pthread_mutex_destroy(&vp->write_lock);
         pthread_mutex_destroy(&vp->cv_lock);
-        memset(vp, 0, sizeof(*vp));
+        free(vp);
         return err;
     }
     if ((err = pthread_cond_init(&vp->cv, NULL)) != 0) {
         pthread_mutex_destroy(&vp->write_lock);
         pthread_mutex_destroy(&vp->waiter_lock);
         pthread_mutex_destroy(&vp->cv_lock);
-        memset(vp, 0, sizeof(*vp));
+        free(vp);
         return err;
     }
     if ((err = pthread_cond_init(&vp->waiter_cv, NULL)) != 0) {
@@ -227,7 +274,7 @@ pthread_var_init_np(pthread_var_np_t *vpp,
         pthread_mutex_destroy(&vp->waiter_lock);
         pthread_mutex_destroy(&vp->cv_lock);
         pthread_cond_destroy(&vp->cv);
-        memset(vp, 0, sizeof(*vp));
+        free(vp);
         return err;
     }
 
@@ -259,12 +306,12 @@ pthread_var_init_np(pthread_var_np_t *vpp,
  * @param [in] var The thread-safe global variable to destroy
  */
 void
-pthread_var_destroy_np(pthread_var_np_t vp)
+thread_safe_var_destroy(thread_safe_var vp)
 {
     if (vp == 0)
         return;
 
-    pthread_var_release_np(vp);
+    thread_safe_var_release(vp);
     pthread_mutex_lock(&vp->write_lock); /* There'd better not be readers */
     pthread_cond_destroy(&vp->cv);
     pthread_mutex_destroy(&vp->cv_lock);
@@ -277,12 +324,13 @@ pthread_var_destroy_np(pthread_var_np_t vp)
     vp->dtor = NULL;
     pthread_mutex_unlock(&vp->write_lock);
     pthread_mutex_destroy(&vp->write_lock);
+    free(vp);
     /* Remaining references will be released by the thread key destructor */
     /* XXX We leak var->tkey!  See note in initiator above. */
 }
 
 static int
-signal_writer(pthread_var_np_t vp)
+signal_writer(thread_safe_var vp)
 {
     int err;
 
@@ -303,16 +351,14 @@ signal_writer(pthread_var_np_t vp)
  * @return Zero on success, a system error code otherwise
  */
 int
-pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
+thread_safe_var_get(thread_safe_var vp, void **res, uint64_t *version)
 {
     int err = 0;
     int err2 = 0;
     uint32_t nref;
     struct var *v;
-    uint64_t vers, vers2;
+    uint64_t vers;
     struct vwrapper *wrapper;
-    int got_both_slots = 0; /* Whether we incremented both slots' nreaders */
-    int do_signal_writer = 0;
 
     if (version == NULL)
         version = &vers;
@@ -329,143 +375,56 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
         return 0;
     }
 
-    /* Get the current next version */
-    *version = atomic_read_64(&vp->next_version);
-    if (*version == 0) {
-        /* Not set yet */
-        assert(*version == 0 || *res != NULL);
-        return 0;
-    }
-    (*version)--; /* make it the current version */
+    /* Busy loop to get current slot.  Races with writers. */
+    for (;;) {
+        /* Get the current next_version */
+        *version = atomic_read_64(&vp->next_version);
+        if (*version == 0)
+            return 0;
+        (*version)--; /* The current version is one less than next_version */
 
-    /* Get what we hope is still the current slot */
-    v = &vp->vars[(*version) & 0x1];
+        /* Get what we hope is still the current slot */
+        v = &vp->vars[(*version) & 0x1];
 
-    /*
-     * We picked a slot, but we could just have lost against one or more
-     * writers.  So far nothing we've done would block any number of
-     * them.
-     *
-     * We increment nreaders for the slot we picked to keep out
-     * subsequent writers; we can then lose one more race at most.
-     *
-     * But we still need to learn whether we lost the race.
-     */
-    (void) atomic_inc_32_nv(&v->nreaders);
-
-    /* See if we won any race */
-    if ((vers2 = atomic_read_64(&vp->next_version)) == *version) {
         /*
-         * We won, or didn't race at all.  We can now safely
-         * increment nref for the wrapped value in the current slot.
+         * We picked a slot, but we could just have lost against one or more
+         * writers.  So far nothing we've done would block any number of
+         * them.
          *
-         * We can still have lost one race, but this slot is now ours.
-         *
-         * The key here is that we updated nreaders for one slot,
-         * which might not keep the one writer we might have been
-         * racing with from making the then current slot the now
-         * previous slot, but because writers are serialized it will
-         * keep the next writer from touching the slot we thought
-         * was the current slot.  Thus here we either have the
-         * current slot or the previous slot, and either way it's OK
-         * for us to grab a reference to the wrapped value in the
-         * slot we took.
+         * We increment nreaders for the slot we picked to keep out
+         * subsequent writers; we can then lose one more race at most.
          */
-        goto got_a_slot;
+        (void) atomic_inc_32_nv(&v->nreaders);
+        /* Repeat until we're done losing any races */
+        if (atomic_read_64(&vp->next_version) == (*version + 1))
+            break;
+        if (atomic_dec_32_nv(&v->nreaders) == 0)
+            (void) signal_writer(vp);
     }
 
-    /*
-     * We may have incremented nreaders for the wrong slot.  Any number
-     * of writers could have written between our getting
-     * vp->next_version the first time, and our incrementing nreaders
-     * for the corresponding slot.  We can't incref the nref of the
-     * value wrapper found at the slot we picked.  We first have to find
-     * the correct current slot, or ensure that no writer will release
-     * the other slot.
-     *
-     * We increment the reader count on the other slot, but we do it
-     * *before* decrementing the reader count on this one.  This should
-     * guarantee that we find the other one present by keeping
-     * subsequent writers (subsequent to the second writer we might be
-     * racing with) out of both slots for the time between the update of
-     * one slot's nreaders and the other's.
-     *
-     * We then have to repeat the race loss detection.  We need only do
-     * this at most once.
-     */
-    atomic_inc_32_nv(&v->other->nreaders);
-
-    /* We hold both slots */
-    got_both_slots = 1;
-
-    /*
-     * vp->next_version can now increment by at most one, and we're
-     * guaranteed to have one usable slot (whichever one we _now_ see as
-     * the current slot, and which can still become the previous slot).
-     */
-    vers2 = atomic_read_64(&vp->next_version);
-    assert(vers2 > *version);
-    *version = vers2 - 1;
-
-    /* Select a slot that looks current in this thread */
-    v = &vp->vars[(*version) & 0x1];
-
-got_a_slot:
-    if (v->wrapper == NULL) {
-        /* Whoa, nothing there; shouldn't happen; assert? */
-        assert(*version == 0);
-        assert(*version == 0 || *res != NULL);
-        if (got_both_slots && atomic_dec_32_nv(&v->other->nreaders) == 0) {
-            /* Last reader of a slot -> signal writer. */
-            do_signal_writer = 1;
-        }
-        /*
-         * Optimization TODO:
-         *
-         *    If vp->next_version hasn't changed since earlier then we
-         *    should be able to avoid having to signal a writer when we
-         *    decrement what we know is the current slot's nreaders to
-         *    zero.  This should read:
-         *
-         *    if ((atomic_dec_32_nv(&v->nreaders) == 0 &&
-         *         atomic_read_64(&vp->next_version) == vers2) ||
-         *        do_signal_writer)
-         *        err2 = signal_writer(vp);
-         */
-        if (atomic_dec_32_nv(&v->nreaders) == 0 || do_signal_writer)
-            err2 = signal_writer(vp);
-        return (err2 == 0) ? err : err2;
-    }
-
-    assert(vers2 == atomic_read_64(&vp->next_version) ||
-           (vers2 + 1) == atomic_read_64(&vp->next_version));
+    assert(v->wrapper != NULL);
+    assert(*version + 1 == atomic_read_64(&vp->next_version) ||
+           *version + 2 == atomic_read_64(&vp->next_version));
 
     /* Take the wrapped value for the slot we chose */
     nref = atomic_inc_32_nv(&v->wrapper->nref);
     assert(nref > 1);
     *version = v->wrapper->version;
-    *res = atomic_read_ptr((volatile void **)&v->wrapper->ptr);
-    assert(*res != NULL);
+    *res = v->wrapper->ptr;
+
 
     /*
-     * We'll release the previous wrapper and save the new one in
-     * vp->tkey below, after releasing the slot it came from.
-     */
-    wrapper = v->wrapper;
-
-    /*
-     * Release the slot(s) and signal any possible waiting writer if
-     * either slot's nreaders drops to zero (that's what the writer will
-     * be waiting for).
+     * Release the slot and signal any possible waiting writer if the slot's
+     * nreaders drops to zero (that's what the writer will be waiting for).
      *
      * The one blocking operation done by readers happens in
      * signal_writer(), but that one blocking operation is for a lock
      * that the writer will have or will soon have released, so it's
      * a practically uncontended blocking operation.
      */
-    if (got_both_slots && atomic_dec_32_nv(&v->other->nreaders) == 0)
-        do_signal_writer = 1;
-    if (atomic_dec_32_nv(&v->nreaders) == 0 || do_signal_writer)
+    wrapper = v->wrapper;
+    if (atomic_dec_32_nv(&v->nreaders) == 0 &&
+        atomic_read_64(&vp->next_version) != (*version + 1))
         err2 = signal_writer(vp);
 
     /*
@@ -477,10 +436,11 @@ got_a_slot:
      *
      * TODO We could use a lock-less queue/stack to queue up wrappers
      *      for destruction by writers, then readers could be even more
-     *      light-weight.
+     *      light-weight.  But then while synchronous value destruction could
+     *      be valuable.
      */
-    if (*res != pthread_getspecific(vp->tkey))
-        pthread_var_release_np(vp);
+    if (wrapper != pthread_getspecific(vp->tkey))
+        thread_safe_var_release(vp);
 
     /* Recall this value we just read */
     err = pthread_setspecific(vp->tkey, wrapper);
@@ -494,7 +454,7 @@ got_a_slot:
  * @param vp [in] A thread-safe global variable
  */
 void
-pthread_var_release_np(pthread_var_np_t vp)
+thread_safe_var_release(thread_safe_var vp)
 {
     struct vwrapper *wrapper = pthread_getspecific(vp->tkey);
 
@@ -516,8 +476,8 @@ pthread_var_release_np(pthread_var_np_t vp)
  * @return 0 on success, or a system error such as ENOMEM.
  */
 int
-pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
-                     uint64_t *new_version)
+thread_safe_var_set(thread_safe_var vp, void *cfdata,
+                    uint64_t *new_version)
 {
     int err;
     size_t i;
@@ -633,11 +593,9 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
     return pthread_mutex_unlock(&vp->write_lock);
 }
 
-#else /* USE_TSGV_SLOT_PAIR_DESIGN */
+#else /* USE_TSV_SLOT_PAIR_DESIGN */
 
-#ifndef USE_TSGV_SUBSCRIPTION_SLOTS_DESIGN
-#error "Unknown TSGV implementation name"
-#endif
+#include <sched.h>
 
 /*
  * Subscription Slot Design
@@ -680,11 +638,78 @@ pthread_var_set_np(pthread_var_np_t vp, void *cfdata,
  */
 
 /*
+ * Design #2: Value list + per-reader thread slots.
+ *
+ * This design uses a list of referenced values and a set of slots, one per
+ * thread that has read this thread-safe global variable.
+ *
+ * Readers "subscribe" the first time they read a thread-safe global variable,
+ * allocating a slot.  Thereafter readers are very fast, using two fenced
+ * memory operations to get the newest value of the thread-safe global
+ * variable.
+ *
+ * Writers add new values to the head of a linked list, then garbage collect
+ * the list by visiting all the reader subscription slots to mark the list then
+ * sweep it.
+ *
+ * Readers never ever block and never call into the allocator.  First time
+ * readers are O(N), else they are O(1).  Compare to the two-slot design where
+ * readers may block briefly but are always O(1).
+ *
+ * Writers are serialized but do not block while holding the lock.  Writers do
+ * not call the allocator while holding the lock.  Writers are O(N).  Compare to
+ * the two-slot design, where writers are O(1).
+ */
+
+/* This is an element on the list of referenced values */
+struct value {
+    volatile struct value   *next;      /* previous (still ref'd) value */
+    void                    *value;     /* actual value */
+    volatile uint64_t       version;    /* version number */
+    volatile uint32_t       referenced; /* for mark and sweep */
+};
+
+/*
+ * Each thread that has read this thread-safe global variable gets one
+ * of these.
+ */
+struct slot {
+    volatile struct value       *value; /* reference to last value read */
+    volatile uint32_t           in_use; /* atomic */
+    thread_safe_var             vp;     /* for cleanup from thread key dtor */
+    /* We could add a pthread_t here */
+};
+
+/*
+ * Slots are allocated in arrays that are linked into one larger logical
+ * array.
+ */
+struct slots {
+    volatile struct slots   *next;      /* atomic */
+    struct slot             *slot_array;/* atomic */
+    volatile uint32_t       slot_count; /* atomic */
+    uint32_t                slot_base;  /* logical index of slot_array[0] */
+};
+
+struct thread_safe_var_s {
+    pthread_key_t           tkey;           /* to detect thread exits */
+    pthread_mutex_t         write_lock;     /* one writer at a time */
+    pthread_mutex_t         waiter_lock;    /* to signal waiters */
+    pthread_cond_t          waiter_cv;      /* to signal waiters */
+    var_dtor_t              dtor;           /* value destructor */
+    volatile struct value   *values;        /* atomic ref'd value list head */
+    volatile struct slots   *slots;         /* atomic reader subscription slots */
+    volatile uint32_t       next_slot_idx;  /* atomic index of next new slot */
+    volatile uint32_t       slots_in_use;   /* atomic count of live readers */
+    uint32_t                nvalues;        /* writer-only; for housekeeping */
+};
+
+/*
  * Lock-less utility that scans through logical slot array looking for a
  * free slot to reuse.
  */
 static struct slot *
-get_free_slot(pthread_var_np_t vp)
+get_free_slot(thread_safe_var vp)
 {
     struct slots *slots;
     struct slot *slot;
@@ -704,7 +729,7 @@ get_free_slot(pthread_var_np_t vp)
 
 /* Lock-less utility to get nth slot */
 static struct slot *
-get_slot(pthread_var_np_t vp, uint32_t slot_idx)
+get_slot(thread_safe_var vp, uint32_t slot_idx)
 {
     struct slots *slots;
     uint32_t nslots = 0;
@@ -726,7 +751,7 @@ get_slot(pthread_var_np_t vp, uint32_t slot_idx)
 
 /* Lock-less utility to grow the logical slot array */
 static int
-grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
+grow_slots(thread_safe_var vp, uint32_t slot_idx, int tries)
 {
     uint32_t nslots = 0;
     uint32_t additions;
@@ -804,7 +829,7 @@ grow_slots(pthread_var_np_t vp, uint32_t slot_idx, int tries)
 
 /* Utility to destroy a thread-safe global variable */
 static void
-destroy_var(pthread_var_np_t vp)
+destroy_var(thread_safe_var vp)
 {
     struct slots *slots;
     struct value *val;
@@ -876,10 +901,10 @@ release_slot(void *data)
  * @return Returns zero on success, else a system error number
  */
 int
-pthread_var_init_np(pthread_var_np_t *vpp,
-                    pthread_var_destructor_np_t dtor)
+thread_safe_var_init(thread_safe_var *vpp,
+                     thread_safe_var_dtor_f dtor)
 {
-    pthread_var_np_t vp;
+    thread_safe_var vp;
     int err;
 
     *vpp = NULL;
@@ -913,7 +938,7 @@ pthread_var_init_np(pthread_var_np_t *vpp,
     }
 
     if ((err = grow_slots(vp, 3, 1)) != 0) {
-        pthread_var_destroy_np(vp);
+        thread_safe_var_destroy(vp);
         return err;
     }
 
@@ -932,7 +957,7 @@ pthread_var_init_np(pthread_var_np_t *vpp,
  * @param [in] var The thread-safe global variable to destroy
  */
 void
-pthread_var_destroy_np(pthread_var_np_t vp)
+thread_safe_var_destroy(thread_safe_var vp)
 {
     if (vp == 0)
         return;
@@ -951,7 +976,7 @@ pthread_var_destroy_np(pthread_var_np_t vp)
  * @return Zero on success, a system error code otherwise
  */
 int
-pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
+thread_safe_var_get(thread_safe_var vp, void **res, uint64_t *version)
 {
     int err = 0;
     uint32_t slot_idx;
@@ -997,8 +1022,8 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
      * run as many times as writers can run between the conditional and
      * the body.  This loop can only be an infinite loop if there's an
      * infinite number of writers who run with higher priority than this
-     * thread.  This is why writers yield() before dropping their write
-     * lock.
+     * thread.  This is why writers sched_yield() before dropping their
+     * write lock.
      *
      * Note that in the body of this loop we can write a soon-to-become-
      * invalid value to our slot because many writers can write between
@@ -1024,7 +1049,7 @@ pthread_var_get_np(pthread_var_np_t vp, void **res, uint64_t *version)
  * @param vp [in] A thread-safe global variable
  */
 void
-pthread_var_release_np(pthread_var_np_t vp)
+thread_safe_var_release(thread_safe_var vp)
 {
     struct slot *slot;
 
@@ -1035,7 +1060,7 @@ pthread_var_release_np(pthread_var_np_t vp)
     atomic_write_32(&slot->in_use, 0);
 }
 
-static volatile struct value *mark_values(pthread_var_np_t);
+static volatile struct value *mark_values(thread_safe_var);
 
 /**
  * Set new data on a thread-safe global variable
@@ -1047,8 +1072,8 @@ static volatile struct value *mark_values(pthread_var_np_t);
  * @return 0 on success, or a system error such as ENOMEM.
  */
 int
-pthread_var_set_np(pthread_var_np_t vp, void *data,
-                     uint64_t *new_version)
+thread_safe_var_set(thread_safe_var vp, void *data,
+                    uint64_t *new_version)
 {
     struct value *new_value;
     volatile struct value *old_values = NULL;
@@ -1103,7 +1128,7 @@ pthread_var_set_np(pthread_var_np_t vp, void *data,
      * don't know that here), we yield the CPU before releasing the
      * write lock.  Hopefully we yield to a reader.
      */
-    yield();
+    sched_yield();
     err = pthread_mutex_unlock(&vp->write_lock);
 
     /* Free old values now, holding no locks */
@@ -1148,7 +1173,7 @@ value_binary_search(volatile struct value **seen, size_t n, volatile struct valu
 
 /* Mark half of mark-and-sweep GC */
 static volatile struct value *
-mark_values(pthread_var_np_t vp)
+mark_values(thread_safe_var vp)
 {
     volatile struct value **old_values_array;
     volatile struct value * volatile *p;
@@ -1176,9 +1201,10 @@ mark_values(pthread_var_np_t vp)
         assert(old_values_array[i-1] < old_values_array[i]);
 
     /*
-     * Mark. This is O(N log(N)) where N is the number of subscribed
-     * threads, but with the optimizations below, and with a bit of
-     * luck, this is more like O(N) than like O(N log(N))
+     * Mark. This is O(N log(M)) where N is the number of subscribed
+     * threads and M is the number of values, but with the optimizations
+     * below, and with a bit of luck, this is more like O(N) than like
+     * O(N log(M)).
      */
     vp->values->referenced = 1; /* curr value is always in use */
 
@@ -1260,7 +1286,7 @@ mark_values(pthread_var_np_t vp)
     return old_values;
 }
 
-#endif /* USE_TSGV_SLOT_PAIR_DESIGN */
+#endif /* USE_TSV_SLOT_PAIR_DESIGN */
 
 /* Code common to both implementations */
 
@@ -1272,18 +1298,18 @@ mark_values(pthread_var_np_t vp)
  * @return Zero on success, else a system error
  */
 int
-pthread_var_wait_np(pthread_var_np_t vp)
+thread_safe_var_wait(thread_safe_var vp)
 {
     void *junk;
     int err;
 
-    if ((err = pthread_var_get_np(vp, &junk, NULL)) == 0 && junk != NULL)
+    if ((err = thread_safe_var_get(vp, &junk, NULL)) == 0 && junk != NULL)
         return 0;
 
     if ((err = pthread_mutex_lock(&vp->waiter_lock)) != 0)
         return err;
 
-    while ((err = pthread_var_get_np(vp, &junk, NULL)) == 0 &&
+    while ((err = thread_safe_var_get(vp, &junk, NULL)) == 0 &&
            junk == NULL) {
         if ((err = pthread_cond_wait(&vp->waiter_cv,
                                      &vp->waiter_lock)) != 0) {
@@ -1293,7 +1319,7 @@ pthread_var_wait_np(pthread_var_np_t vp)
     }
 
     /*
-     * The first writer signals, rather than broadcase, to avoid a
+     * The first writer signals, rather than broadcast, to avoid a
      * thundering herd.  We propagate the signal here so the rest of the
      * herd wakes, one at a time.
      */

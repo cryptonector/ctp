@@ -30,6 +30,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define _BSD_SOURCE 600
+#define _DEFAULT_SOURCE
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -37,10 +38,12 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include "thread_safe_global.h"
@@ -61,7 +64,7 @@
  *    threads total and to bind each thread to a different CPU.
  */
 
-struct timespec
+static struct timespec
 timeadd(struct timespec a, struct timespec b)
 {
     struct timespec r;
@@ -72,7 +75,7 @@ timeadd(struct timespec a, struct timespec b)
     return r;
 }
 
-struct timespec
+static struct timespec
 timesub(struct timespec a, struct timespec b)
 {
     struct timespec r;
@@ -96,24 +99,27 @@ static void *idle_reader(void *);
 static void *writer(void *data);
 static void dtor(void *);
 
-static pthread_t readers[20];
-static pthread_t writers[4];
-#define NREADERS    (sizeof(readers)/sizeof(readers[0]))
-#define NWRITERS    (sizeof(writers)/sizeof(writers[0]))
-#define MY_NTHREADS (NREADERS + NWRITERS)
+static pthread_t *readers;
+static pthread_t *writers;
+static size_t nreaders;
+static size_t nwriters;
+static size_t readerq; /* how often readers print on stdout */
+static size_t writerq; /* how often writers print on stdout */
+#define MY_NTHREADS (nreaders + nwriters)
+
 static pthread_mutex_t exit_cv_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t exit_cv = PTHREAD_COND_INITIALIZER;
-static uint32_t nthreads = MY_NTHREADS;
-static uint32_t random_bytes[MY_NTHREADS];
-static uint32_t idleruns[MY_NTHREADS];
-static uint64_t *runs[MY_NTHREADS];
-static struct timespec starttimes[MY_NTHREADS];
-static struct timespec endtimes[MY_NTHREADS];
-static struct timespec runtimes[MY_NTHREADS];
-static struct timespec sleeptimes[MY_NTHREADS];
-static struct timespec idlestarttimes[MY_NTHREADS];
-static struct timespec idleendtimes[MY_NTHREADS];
-static struct timespec idleruntimes[MY_NTHREADS];
+static uint32_t nthreads;
+static uint32_t *random_bytes;
+static uint32_t *idleruns;
+static uint64_t **runs;
+static struct timespec *starttimes;
+static struct timespec *endtimes;
+static struct timespec *runtimes;
+static struct timespec *sleeptimes;
+static struct timespec *idlestarttimes;
+static struct timespec *idleendtimes;
+static struct timespec *idleruntimes;
 
 enum magic {
     MAGIC_FREED = 0xABADCAFEEFACDABAUL,
@@ -121,12 +127,35 @@ enum magic {
     MAGIC_EXIT = 0xAABBCCDDFFEEDDCCUL,
 };
 
-pthread_var_np_t var;
+thread_safe_var var;
+
+static int
+usage(const char *arg0, const char *arg, size_t nproc)
+{
+    int e = (arg != NULL && strcmp(arg, "-h") == 0) ? 0 : 1;
+    FILE *f = e ? stderr : stdout;
+
+    if (strchr(arg0, '/') != NULL)
+        arg0 = strrchr(arg0, '/');
+
+    fprintf(f, "Usage: %s [NREADERS [NWRITERS [READERQ [WRITERQ]]]]\n"
+            "\n\tRuns NREADER and NWRITER threads racing on a single\n"
+            "\tthread_safe_var.\n\n"
+            "\tNREADERS defaults to %ju (NPROC).\n\n"
+            "\tNWRITERS defaults to %ju (the greater of NREADERS / 5 or 1).\n"
+            "\n\tEach thread will print a single character to stdout\n"
+            "\tevery READERQ or WRITERQ runs, as appropriate.\n",
+            arg0, (uintmax_t)nproc, (uintmax_t)(nproc / 5 ? nproc / 5 : 1));
+
+    return e;
+}
 
 int
-main()
+main(int argc, char **argv)
 {
     size_t i, k;
+    size_t nproc = sysconf(_SC_NPROCESSORS_CONF) > 0 ?
+                        sysconf(_SC_NPROCESSORS_CONF) : 20;
     int urandom_fd;
     uint64_t *magic_exit;
     uint64_t last_version;
@@ -138,6 +167,79 @@ main()
     uint64_t rruns;
     uint64_t wruns = 0;
     double usperrun;
+    intmax_t n;
+    ssize_t bytes;
+    size_t arg = 0;
+    char *e;
+
+    if (argc >= 6)
+        usage(argv[0], NULL, nproc);
+
+    if (argc > 1) {
+        errno = 0;
+        if ((n = strtoimax(argv[++arg], &e, 10)) < 0 || n == INTMAX_MAX ||
+            n >= 16384 || errno != 0 || e == NULL || *e != '\0')
+            return usage(argv[0], argv[arg], nproc);
+        nreaders = (size_t)n;
+    }
+
+    if (argc > 2) {
+        errno = 0;
+        if ((n = strtoimax(argv[++arg], &e, 10)) < 0 || n == INTMAX_MAX ||
+            n >= 16384 || errno != 0 || e == NULL || *e != '\0')
+            return usage(argv[0], argv[arg], nproc);
+        nwriters = n;
+    }
+
+    if (argc > 3) {
+
+        errno = 0;
+        if ((n = strtoimax(argv[++arg], &e, 10)) < 0 || n == INTMAX_MAX ||
+            n >= 16384 || errno != 0 || e == NULL || *e != '\0')
+            return usage(argv[0], argv[arg], nproc);
+        readerq = n;
+    }
+
+    if (argc > 4) {
+        errno = 0;
+        if ((n = strtoimax(argv[++arg], &e, 10)) < 0 || n == INTMAX_MAX ||
+            n >= 16384 || errno != 0 || e == NULL || *e != '\0')
+            return usage(argv[0], argv[arg], nproc);
+        writerq = n;
+    }
+
+    if (nreaders == 0)
+        nreaders = nproc;
+    if (nwriters == 0)
+        nwriters = nreaders / 5 > 0 ? nreaders / 5 : 1;
+
+    if (readerq == 0 && (readerq = nreaders / 10) < 20)
+        readerq = 20;
+    if (writerq == 0 && (writerq = nwriters / 10) < 20)
+        writerq = 20;
+    nthreads = MY_NTHREADS;
+
+    printf("Will use %ju reader threads and %ju writer threads\n",
+           (uintmax_t)nreaders, (uintmax_t)nwriters);
+    printf("Readers will print every %ju runs\n", (uintmax_t)readerq);
+    printf("Writers will print every %ju runs\n", (uintmax_t)writerq);
+    sleep(1);
+
+#define MY_CALLOC1(v, n) (((v) = calloc((n), sizeof((v)[0]))) == NULL)
+
+    if (MY_CALLOC1(readers, nreaders) ||
+        MY_CALLOC1(writers, nwriters) ||
+        MY_CALLOC1(random_bytes, MY_NTHREADS) ||
+        MY_CALLOC1(idleruns, MY_NTHREADS) ||
+        MY_CALLOC1(runs, MY_NTHREADS) ||
+        MY_CALLOC1(starttimes, MY_NTHREADS) ||
+        MY_CALLOC1(endtimes, MY_NTHREADS) ||
+        MY_CALLOC1(runtimes, MY_NTHREADS) ||
+        MY_CALLOC1(sleeptimes, MY_NTHREADS) ||
+        MY_CALLOC1(idlestarttimes, MY_NTHREADS) ||
+        MY_CALLOC1(idleendtimes, MY_NTHREADS) ||
+        MY_CALLOC1(idleruntimes, MY_NTHREADS))
+        err(1, "calloc failed");
 
     if ((magic_exit = malloc(sizeof(*magic_exit))) == NULL)
         err(1, "malloc failed");
@@ -146,19 +248,22 @@ main()
     for (i = 0; i < MY_NTHREADS; i++)
         runs[i] = NULL;
 
-    if ((errno = pthread_var_init_np(&var, dtor)) != 0)
-        err(1, "pthread_var_init_np() failed");
+    if ((errno = thread_safe_var_init(&var, dtor)) != 0)
+        err(1, "thread_safe_var_init() failed");
 
     if ((urandom_fd = open("/dev/urandom", O_RDONLY)) == -1)
         err(1, "Failed to open(\"/dev/urandom\", O_RDONLY)");
-    if (read(urandom_fd, random_bytes, sizeof(random_bytes)) != sizeof(random_bytes))
+    if ((bytes = read(urandom_fd, random_bytes,
+             sizeof(random_bytes[0]) * MY_NTHREADS)) < 0)
         err(1, "Failed to read() from /dev/urandom");
+    if ((size_t)bytes != sizeof(random_bytes[0]) * MY_NTHREADS)
+        err(1, "Failed to read() enough from /dev/urandom");
     (void) close(urandom_fd);
 
     if ((errno = pthread_mutex_lock(&exit_cv_lock)) != 0)
         err(1, "Failed to acquire exit lock");
 
-    for (i = 0; i < NREADERS; i++) {
+    for (i = 0; i < nreaders; i++) {
         if ((errno = pthread_create(&readers[i], NULL, reader, &random_bytes[i])) != 0)
             err(1, "Failed to create reader thread no. %ju", (uintmax_t)i);
         if ((errno = pthread_detach(readers[i])) != 0)
@@ -168,7 +273,7 @@ main()
     if (clock_gettime(CLOCK_MONOTONIC, &starttime) != 0)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
-    for (k = i, i = 0; i < NWRITERS; i++, k++) {
+    for (k = i, i = 0; i < nwriters; i++, k++) {
         if ((errno = pthread_create(&writers[i], NULL, writer, &random_bytes[k])) != 0)
             err(1, "Failed to create writer thread no. %ju", (uintmax_t)i);
         if ((errno = pthread_detach(writers[i])) != 0)
@@ -178,9 +283,9 @@ main()
     while (atomic_cas_32(&nthreads, 0, 0) > 0) {
         if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
             err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
-        if (atomic_cas_32(&nthreads, 0, 0) == NREADERS) {
-            if ((errno = pthread_var_set_np(var, magic_exit, &last_version)) != 0)
-                err(1, "pthread_var_set_np failed");
+        if (atomic_cas_32(&nthreads, 0, 0) == nreaders) {
+            if ((errno = thread_safe_var_set(var, magic_exit, &last_version)) != 0)
+                err(1, "thread_safe_var_set() failed");
             printf("\nTold readers to exit.\n");
         }
     }
@@ -199,14 +304,14 @@ main()
 #define IDLE_READ_RUNS 50000
 
         /* Measure single-threaded read performance on an idle var */
-        if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
-            err(1, "pthread_var_get_np(var) failed");
+        if ((errno = thread_safe_var_get(var, &p, &version)) != 0)
+            err(1, "thread_safe_var_get() failed");
         assert(version == last_version);
         if (clock_gettime(CLOCK_MONOTONIC, &idle_start) != 0)
             err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
         for (i = 0; i < IDLE_READ_RUNS; i++) {
-            if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
-                err(1, "pthread_var_get_np(var) failed");
+            if ((errno = thread_safe_var_get(var, &p, &version)) != 0)
+                err(1, "thread_safe_var_get() failed");
             assert(version == last_version);
         }
         if (clock_gettime(CLOCK_MONOTONIC, &idle_end) != 0)
@@ -220,8 +325,8 @@ main()
 #define THREADED_IDLE_READ_RUNS 50000
 
         /* Test threaded idle reader performance */
-        atomic_cas_32(&nthreads, 0, NREADERS);
-        for (i = 0; i < NREADERS; i++) {
+        atomic_cas_32(&nthreads, 0, nreaders);
+        for (i = 0; i < nreaders; i++) {
             idleruns[i] = THREADED_IDLE_READ_RUNS;
             if ((errno = pthread_create(&readers[i], NULL, idle_reader,
                                         idleruns)) != 0)
@@ -233,9 +338,9 @@ main()
         while (atomic_cas_32(&nthreads, 0, 0) > 0) {
             if ((errno = pthread_cond_wait(&exit_cv, &exit_cv_lock)) != 0)
                 err(1, "pthread_cond_wait(&exit_cv, &exit_cv_lock) failed");
-            if (atomic_cas_32(&nthreads, 0, 0) == NREADERS) {
-                if ((errno = pthread_var_set_np(var, magic_exit, &last_version)) != 0)
-                    err(1, "pthread_var_set_np failed");
+            if (atomic_cas_32(&nthreads, 0, 0) == nreaders) {
+                if ((errno = thread_safe_var_set(var, magic_exit, &last_version)) != 0)
+                    err(1, "thread_safe_var_set() failed");
                 printf("\nTold readers to exit.\n");
             }
         }
@@ -243,16 +348,16 @@ main()
         rruns = 0;
         runtime.tv_sec = 0;
         runtime.tv_nsec = 0;
-        for (i = 0; i < NREADERS; i++) {
+        for (i = 0; i < nreaders; i++) {
             runtime = timeadd(runtime, idleruntimes[i]);
             rruns += idleruns[i];
         }
         printf("Threaded idle read runs: %ju, read runtimes: %jus, %juns\n",
                (uintmax_t)rruns,
-               (uintmax_t)runtime.tv_sec / NREADERS,
-               (uintmax_t)runtime.tv_nsec / NREADERS);
-        usperrun = (runtime.tv_sec * 1000000) / NREADERS +
-                   (runtime.tv_nsec / 1000) / NREADERS;
+               (uintmax_t)runtime.tv_sec / nreaders,
+               (uintmax_t)runtime.tv_nsec / nreaders);
+        usperrun = (runtime.tv_sec * 1000000) / nreaders +
+                   (runtime.tv_nsec / 1000) / nreaders;
         usperrun /= rruns;
         printf("Average threaded idle read time: %fus\n", usperrun);
         printf("Threaded idle reads/s: %f/s\n", ((double)1000000.0)/usperrun);
@@ -263,8 +368,8 @@ main()
         if (clock_gettime(CLOCK_MONOTONIC, &idle_start) != 0)
             err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
         for (i = 0; i < IDLE_READ_RUNS; i++) {
-            if ((errno = pthread_var_set_np(var, (void *)0x08UL, &version)) != 0)
-                err(1, "pthread_var_set_np(var) failed");
+            if ((errno = thread_safe_var_set(var, (void *)0x08UL, &version)) != 0)
+                err(1, "thread_safe_var_set() failed");
             assert(version == last_version + 1);
             last_version = version;
         }
@@ -278,7 +383,7 @@ main()
     }
 
     (void) pthread_mutex_unlock(&exit_cv_lock);
-    pthread_var_destroy_np(var);
+    thread_safe_var_destroy(var);
 
     printf("Run time: %jus, %juns\n", (uintmax_t)runtime.tv_sec,
            (uintmax_t)runtime.tv_nsec);
@@ -288,7 +393,7 @@ main()
     runtime.tv_nsec = 0;
     sleeptime.tv_sec = 0;
     sleeptime.tv_nsec = 0;
-    for (i = 0; i < NREADERS; i++) {
+    for (i = 0; i < nreaders; i++) {
         runtime = timeadd(runtime, runtimes[i]);
         sleeptime = timeadd(sleeptime, sleeptimes[i]);
         rruns += *(runs[i]);
@@ -296,12 +401,12 @@ main()
     printf("Read runs: %ju, read runtimes: %jus, %juns "
            "read sleeptimes: %jus, %juns\n",
            (uintmax_t)rruns,
-           (uintmax_t)runtime.tv_sec / NREADERS,
-           (uintmax_t)runtime.tv_nsec / NREADERS,
-           (uintmax_t)sleeptime.tv_sec / NREADERS,
-           (uintmax_t)sleeptime.tv_nsec / NREADERS);
-    usperrun = (runtime.tv_sec * 1000000) / NREADERS +
-               (runtime.tv_nsec / 1000) / NREADERS;
+           (uintmax_t)runtime.tv_sec / nreaders,
+           (uintmax_t)runtime.tv_nsec / nreaders,
+           (uintmax_t)sleeptime.tv_sec / nreaders,
+           (uintmax_t)sleeptime.tv_nsec / nreaders);
+    usperrun = (runtime.tv_sec * 1000000) / nreaders +
+               (runtime.tv_nsec / 1000) / nreaders;
     usperrun /= rruns;
     printf("Average read time: %fus\n", usperrun);
     printf("Reads/s: %f/s\n", ((double)1000000.0)/usperrun);
@@ -310,20 +415,20 @@ main()
     runtime.tv_nsec = 0;
     sleeptime.tv_sec = 0;
     sleeptime.tv_nsec = 0;
-    for (i = 0; i < NWRITERS; i++) {
-        runtime = timeadd(runtime, runtimes[NREADERS + i]);
-        sleeptime = timeadd(sleeptime, sleeptimes[NREADERS + i]);
-        wruns += *(runs[NREADERS + i]);
+    for (i = 0; i < nwriters; i++) {
+        runtime = timeadd(runtime, runtimes[nreaders + i]);
+        sleeptime = timeadd(sleeptime, sleeptimes[nreaders + i]);
+        wruns += *(runs[nreaders + i]);
     }
     printf("Write runs: %ju, write runtimes: %jus, %juns "
            "write sleeptimes: %jus, %juns\n",
            (uintmax_t)wruns,
-           (uintmax_t)runtime.tv_sec / NWRITERS,
-           (uintmax_t)runtime.tv_nsec / NWRITERS,
-           (uintmax_t)sleeptime.tv_sec / NWRITERS,
-           (uintmax_t)sleeptime.tv_nsec / NWRITERS);
-    usperrun = (runtime.tv_sec * 1000000) / NWRITERS +
-               (runtime.tv_nsec / 1000) / NWRITERS;
+           (uintmax_t)runtime.tv_sec / nwriters,
+           (uintmax_t)runtime.tv_nsec / nwriters,
+           (uintmax_t)sleeptime.tv_sec / nwriters,
+           (uintmax_t)sleeptime.tv_nsec / nwriters);
+    usperrun = (runtime.tv_sec * 1000000) / nwriters +
+               (runtime.tv_nsec / 1000) / nwriters;
     usperrun /= wruns;
     printf("Average write time: %fus\n", usperrun);
     printf("Writes/s: %f/s\n", ((double)1000000.0)/usperrun);
@@ -348,27 +453,28 @@ reader(void *data)
     int first = 1;
     void *p;
 
+    thread_num %= MY_NTHREADS;
     runs[thread_num] = calloc(1, sizeof(runs[0]));
 
     if (us > 2000)
         us = 2000 + us % 2000;
     if (thread_num == 0 || thread_num == 1 || thread_num == 2)
-        us = 0;
-    if (thread_num == NREADERS - 1)
-        us = 500000;
+        us = 0; /* A few fast threads */
+    if (thread_num == (int)nreaders - 1)
+        us = 500000; /* One really slow thread */
 
     printf("Reader (%jd) will sleep %uus between runs\n", (intmax_t)thread_num, us);
 
-    if ((errno = pthread_var_wait_np(var)) != 0)
-        err(1, "pthread_var_wait_np(var) failed");
+    if ((errno = thread_safe_var_wait(var)) != 0)
+        err(1, "thread_safe_var_wait() failed");
 
     if (clock_gettime(CLOCK_MONOTONIC, &starttimes[thread_num]) != 0)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
     for (;;) {
         assert(rruns == (*(runs[thread_num])));
-        if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
-            err(1, "pthread_var_get_np(var) failed");
+        if ((errno = thread_safe_var_get(var, &p, &version)) != 0)
+            err(1, "thread_safe_var_get() failed");
 
         if (version < last_version)
             err(1, "version went backwards for this reader! "
@@ -434,8 +540,8 @@ idle_reader(void *data)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
     for (i = idleruns[thread_num]; i > 0; i--) {
-        if ((errno = pthread_var_get_np(var, &p, &version)) != 0)
-            err(1, "pthread_var_get_np(var) failed");
+        if ((errno = thread_safe_var_get(var, &p, &version)) != 0)
+            err(1, "thread_safe_var_get() failed");
 
         if (first) {
             printf("(%d)", thread_num);
@@ -481,12 +587,12 @@ writer(void *data)
     if (i > 5000)
         i = 4999;
 
-    if (thread_num - NREADERS == NWRITERS - 1) {
+    if (thread_num - nreaders == nwriters - 1) {
         us %= 500;
         i *=10;
     }
 
-    printf("Writer (%jd) will have %ju runs, sleeping %uus between\n", (intmax_t)thread_num - NREADERS, (uintmax_t)i, us);
+    printf("Writer (%jd) will have %ju runs, sleeping %uus between\n", (intmax_t)thread_num - nreaders, (uintmax_t)i, us);
     usleep(500000);
 
     if (clock_gettime(CLOCK_MONOTONIC, &starttimes[thread_num]) != 0)
@@ -497,8 +603,8 @@ writer(void *data)
         if ((p = malloc(sizeof(*p))) == NULL)
             err(1, "malloc() failed");
         *p = MAGIC_INITED;
-        if ((errno = pthread_var_set_np(var, p, &version)) != 0)
-            err(1, "pthread_var_set_np(var) failed");
+        if ((errno = thread_safe_var_set(var, p, &version)) != 0)
+            err(1, "thread_safe_var_set() failed");
         if (version < last_version)
             err(1, "version went backwards for this writer! "
                 "new version is %jd, previous is %jd",

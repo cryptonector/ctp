@@ -147,9 +147,9 @@ atomic_cas_ptr(volatile void **p, void *oldval, void *newval)
 #ifdef HAVE___ATOMIC
     volatile void *expected = oldval;
     (void) __atomic_compare_exchange_n(p, &expected, newval, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-    return (void *)/*drop volatile*/expected;
+    return (void *)(uintptr_t)/*drop volatile*/expected;
 #elif defined(HAVE___SYNC)
-    return __sync_val_compare_and_swap((void **)/*drop volatile*/p, oldval, newval);
+    return (void *)(uintptr_t)__sync_val_compare_and_swap(p, oldval, newval);
 #elif defined(WIN32)
     return InterlockedCompareExchangePointer(p, newval, oldval);
 #elif defined(HAVE_INTEL_INTRINSICS)
@@ -229,12 +229,12 @@ void *
 atomic_read_ptr(volatile void **p)
 {
 #ifdef HAVE___ATOMIC
-    return __atomic_load_n((void **)/*drop volatile*/p, __ATOMIC_ACQUIRE);
+    return __atomic_load_n((void **)(uintptr_t)/*drop volatile*/p, __ATOMIC_ACQUIRE);
 #elif defined(HAVE___SYNC)
-    void *junk = NULL;
-    return __sync_val_compare_and_swap((void **)/*drop volatile*/p, &junk, &junk);
+    void *junk = 0;
+    return (void **)(uintptr_t)__sync_val_compare_and_swap(p, &junk, &junk);
 #elif defined(WIN32)
-    void *junk = NULL;
+    void *junk = 0;
     return InterlockedCompareExchangePointer(p, &junk, &junk);
 #elif defined(HAVE_PTHREAD)
     volatile void *v;
@@ -254,7 +254,7 @@ atomic_read_32(volatile uint32_t *p)
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #elif defined(HAVE___SYNC)
     uint32_t junk = 0;
-    return __sync_val_compare_and_swap((void **)/*drop volatile*/p, &junk, &junk);
+    return __sync_val_compare_and_swap(p, &junk, &junk);
 #elif defined(WIN32)
     uint32_t junk = 0;
     return InterlockedCompareExchange32(p, &junk, &junk);
@@ -276,7 +276,7 @@ atomic_read_64(volatile uint64_t *p)
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #elif defined(HAVE___SYNC)
     uint64_t junk = 0;
-    return __sync_val_compare_and_swap((void **)/*drop volatile*/p, &junk, &junk);
+    return __sync_val_compare_and_swap(p, &junk, &junk);
 #elif defined(WIN32)
     uint64_t junk = 0;
     return InterlockedCompareExchange64(p, &junk, &junk);
@@ -298,7 +298,7 @@ atomic_write_ptr(volatile void **p, void *v)
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
     return;
 #elif defined(HAVE___SYNC) || defined(WIN32)
-    void *junk = NULL;
+    void *junk = 0;
     void *old;
     
     old = atomic_cas_ptr(p, &junk, &junk);
@@ -309,7 +309,6 @@ atomic_write_ptr(volatile void **p, void *v)
      * assume the writer is releasing p, which they've acquired and is
      * stable.  This way we don't have to loop.
      */
-    assert(junk == old);
     return;
 #elif defined(HAVE_PTHREAD)
     volatile void *v;
@@ -329,10 +328,10 @@ atomic_write_32(volatile uint32_t *p, uint32_t v)
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
     return;
 #elif defined(HAVE___SYNC) || defined(WIN32)
-    uint32_t junk = NULL;
+    uint32_t junk = 0;
     uint32_t old;
     
-    old = atomic_cas_32(p, &junk, &junk);
+    old = atomic_cas_32(p, junk, junk);
     junk = atomic_cas_32(p, old, v);
 
     /*
@@ -340,7 +339,6 @@ atomic_write_32(volatile uint32_t *p, uint32_t v)
      * assume the writer is releasing p, which they've acquired and is
      * stable.  This way we don't have to loop.
      */
-    assert(junk == old);
     return;
 #elif defined(HAVE_PTHREAD)
     volatile void *v;
@@ -360,10 +358,11 @@ atomic_write_64(volatile uint64_t *p, uint64_t v)
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
     return;
 #elif defined(HAVE___SYNC) || defined(WIN32)
-    uint64_t junk = NULL;
+    uint64_t junk = 0;
     uint64_t old;
     
-    old = atomic_cas_64(p, &junk, &junk);
+    /* A way to force a memory fence? */
+    old = atomic_cas_64(p, junk, junk);
     junk = atomic_cas_64(p, old, v);
 
     /*
@@ -371,7 +370,6 @@ atomic_write_64(volatile uint64_t *p, uint64_t v)
      * assume the writer is releasing p, which they've acquired and is
      * stable.  This way we don't have to loop.
      */
-    assert(junk == old);
     return;
 #elif defined(HAVE_PTHREAD)
     volatile void *v;

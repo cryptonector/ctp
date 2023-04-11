@@ -1,68 +1,91 @@
 
-NOTE: This repo has moved to https://github.com/cryptonector/ctp
+> NOTE: This repo is mirrored at https://github.com/cryptonector/ctp and https://github.com/nicowilliams/ctp
 
-Q: What is it?  A: A "thread-safe global variable" (TSGV) for C
----------------------------------------------------------------
+# Q: What is it?  A: A user-land-RCU-like API for C
 
-This repository's main feature is a thread-safe global variable (TSGV)
-for C.  More C thread-primitives may be added in the future, thus the
-repository's name.
+This repository's only current feature is a read-copy-update (RCU) like,
+thread-safe variable (TSV) for C.  More C thread-primitives may be added
+in the future, thus the repository's name.
 
-A TSGV lets readers keep using a value read from it until they read the
-next value.  Memory management is automatic: values are automatically
-destroyed when the last reference is released (explicitly, or implicitly
-at the next read, or when a reader thread exits).  Reads are *lock-less*
-and fast, and _never block writes_.  Writes are serialized but otherwise
-interact with readers without locks, thus writes *do not block reads*.
+A TSV lets readers safely keep using a value read from the TSV until
+they read the next value.  Memory management is automatic: values are
+automatically destroyed when the last reference to a value is released
+whether explicitly, or implicitly at the next read, or when a reader
+thread exits.  Reads are _lock-less_ and fast, and _never block
+writers_.  Writers are serialized but otherwise interact with readers
+without locks, thus writes *do not block reads*.
 
-This is not unlike a Clojure "ref".  It's also similar to RCU, but
-unlike RCU, this has a much simpler API with nothing like
-`synchronize_rcu()`, and doesn't require any cross-CPU calls nor the
-ability to make CPUs/threads run, and it has no application-visible
-concept of critical sections, therefore it works in user-land with no
-special kernel support.
+This is not unlike a Clojure `ref`, or like a Haskell `msync`.  It's
+also similar to RCU, but unlike RCU, this has a very simple API with
+nothing like `synchronize_rcu()`, and doesn't require any cross-CPU
+calls nor the ability to make CPUs/threads run, and it has no
+application-visible concept of critical sections, therefore it works in
+user-land with no special kernel support.
 
- - One thread needs to create the variable by calling
-   `pthread_var_init_np()` and providing a value destructor.  There is
-   no static initializer, though one could be added.
- - Most threads only ever need to call `pthread_var_get_np()`, and maybe
-   once `pthread_var_wait_np()` to wait until at least one value has
-   been set.
- - One or more threads may call `pthread_var_set_np()` to publish new
-   values.
+ - One thread needs to create the variable (as many as desired) once by
+   calling `thread_safe_var_init()` and providing a value destructor.
+
+   > There is currently no static initializer, though one could be
+   > added.  One would typically do this early in `main()` or in a
+   > `pthread_once()` initializer.
+
+ - Most threads only ever need to call `thread_safe_var_get()`.
+
+   > Reader threads _may_ also call `thread_safe_var_release()` to allow
+   > a value to be freed sooner than otherwise.
+
+ - One or more threads may call `thread_safe_var_set()` to set new
+   values on the TSVs.
 
 The API is:
 
-    typedef struct pthread_var_np *pthread_var_np_t;
-    typedef void (*pthread_var_destructor_np_t)(void *);
-    int  pthread_var_init_np(pthread_var_np_t *var, pthread_var_destructor_np_t value_destructor);
-    void pthread_var_destroy_np(pthread_var_np_t var);
-    int  pthread_var_get_np(pthread_var_np_t var, void **valuep, uint64_t *versionp);
-    int  pthread_var_set_np(pthread_var_np_t var, void *value, uint64_t *versionp);
-    int  pthread_var_wait_np(pthread_var_np_t var);
-    void pthread_var_release_np(pthread_var_np_t var);
+```C
+    typedef struct thread_safe_var *thread_safe_var; /* TSV */
+
+    typedef void (*thread_safe_var_dtor_f)(void *); /* Value destructor */
+
+    /* Initialize a TSV with a given value destructor */
+    int  thread_safe_var_init(thread_safe_var *, thread_safe_var_dtor_f);
+
+    /* Destroy a TSV */
+    void thread_safe_var_destroy(thread_safe_var);
+
+    /* Get the current value of the TSV and a version number for it */
+    int  thread_safe_var_get(thread_safe_var, void **, uint64_t *);
+
+    /* Release the reference to the last value read by this thread from the TSV */
+    void thread_safe_var_release(thread_safe_var);
+
+    /* Wait for a value to be set on the TSV */
+    int  thread_safe_var_wait(thread_safe_var);
+
+    /* Set a new value on the TSV (outputs the new version) */
+    int  thread_safe_var_set(thread_safe_var, void *, uint64_t *);
+```
 
 Value version numbers increase monotonically when values are set.
 
-Why?  Because read-write locks are teh worst
---------------------------------------------
+# Why?  Because read-write locks are terrible
 
-So you have rarely-changing global data (e.g., loaded configuration,
-plugins, ...), and you have many threads that read this, and you want
-reads to be fast.  Worker threads need stable configuration/whatever
-while doing work, then when they pick up another task they can get a
-newer configuration if there is one.  How would you implement that?  A
-safe answer is: read-write locks around reading/writing the global
-variable, and reference count the data.  But read-write locks are
-inherently bad: readers either can starve writers or can be blocked by
-writers.
+So you have rarely-changing typically-global data (e.g., loaded
+configuration, plugin lists, ...), and you have many threads that read
+this, and you want reads to be fast.  Worker threads need stable
+configuration/whatever while doing work, then when they pick up another
+task they can get a newer configuration if there is one.
 
-A thread-safe global variable, on the other hand, is always fast to
-read, even when there's an active writer, and reading does not starve
-writers.
+How would one implement that?
 
-How?
-----
+A safe answer is: read-write locks around reading/writing the variable,
+and reference count the data.
+
+But read-write locks are inherently bad: readers either can starve
+writers or can be blocked by writers.  Either way read-write locks are a
+performance problem.
+
+A "thread-safe variable", on the other hand, is always fast to read,
+even when there's an active writer, and reading does not starve writers.
+
+# How?
 
 Two implementations are included at this time.
 
@@ -72,9 +95,9 @@ The two implementations have slightly different characteristics.
    reads and O(1) serialized writes.
 
    But readers call free() and the value destructor, and, sometimes have
-   to signal a potentially-waiting writer -- a blocking operation,
-   though on an uncontended resource (so not really blocking, but it
-   does involve a system call).
+   to signal a potentially-waiting writer, which involves acquiring a
+   mutex -- a blocking operation, though on an uncontended resource, so
+   not really blocking.
 
    This implementation has a pair of slots, one containing the "current"
    value and one containing the "previous"/"next" value.  Writers make the
@@ -93,10 +116,11 @@ The two implementations have slightly different characteristics.
    Values are reference counted and so released immediately when the
    last reference is dropped.
 
- - The other implementation ("slot list") has O(1) lock-less (but
-   spinning) reads, and O(N log(M)) serialized writes where N is the maximum
-   number of live threads that have read the variable and M is the
-   number of referenced values).
+ - The other implementation ("slot list") has O(1) lock-less reads, with
+   unreferenced values garbage collected by serialized writers in `O(N
+   log(N))` where N is the maximum number of live threads that have read
+   the variable and M is the number of values that have been set and
+   possibly released).
    
    Readers never call the allocator after the first read in any given
    thread, and writers never call the allocator while holding the writer
@@ -123,16 +147,14 @@ The first implementation written was the slot-pair implementation.  The
 slot-list design is much easier to understand on the read-side, but it
 is significantly more complex on the write-side.
 
-Requirements
-------------
+# Requirements
 
-C89, POSIX threads (though TSGV should be portable to Windows),
+C89, POSIX threads (though TSV should be portable to Windows),
 compilers with atomics intrinsics and/or atomics libraries.
 
 In the future this may be upgraded to a C99 or even C11 requirement.
 
-Testing
--------
+# Testing
 
 A test program is included that hammers the implementation.  Run it in a
 loop, with or without valgrind, ASAN (address sanitizer), or other
@@ -147,27 +169,25 @@ of bugs during development.  In both cases writes are, on average, 5x
 slower than reads, and reads are in the ten microseconds range on an old
 laptop, running under virtualization.
 
-Performance
------------
+# Performance
 
-On an old i7 laptop, virtualized, reads on idle thread-safe global
-variables (i.e., no writers in sight) take about 15ns.  This is because
-the fast path in both implementations consists of reading a thread-local
-variable and then performing a single acquire-fenced memory read.
+On an old i7 laptop, virtualized, reads on idle thread-safe variables
+(i.e., no writers in sight) take about 15ns.  This is because the fast
+path in both implementations consists of reading a thread-local variable
+and then performing a single acquire-fenced memory read.
 
 On that same system, when threads write very frequently then reads slow
 down to about 8us (8000ns).  (But the test had eight times more threads
 than CPUs, so the cost of context switching is included in that number.)
 
-On that same system writes on a busy thread-safe global variable take
-about 50us (50000ns), but non-contending writes on an otherwise idle
-thread-safe global variable take about 180ns.
+On that same system writes on a busy thread-safe variable take about
+50us (50000ns), but non-contending writes on an otherwise idle
+thread-safe variable take about 180ns.
 
 I.e., this is blindingly fast, especially for intended use case
 (infrequent writes).
 
-Install
--------
+# Install
 
 Clone this repo, select a configuration, and make it.
 
@@ -190,15 +210,11 @@ Configuration variables:
 
    Values: `-DHAVE___ATOMIC`, `-DHAVE___SYNC`, `-DHAVE_INTEL_INTRINSICS`, `-DHAVE_PTHREAD`, `-DNO_THREADS`
 
- - `TSGV_IMPLEMENTATION`
+ - `TSV_IMPLEMENTATION`
 
-   Values: `-DUSE_TSGV_SLOT_PAIR_DESIGN`, `-DUSE_TSGV_SUBSCRIPTION_SLOTS_DESIGN`
+   Values: `-DUSE_TSV_SLOT_PAIR_DESIGN`, `-DUSE_TSV_SUBSCRIPTION_SLOTS_DESIGN`
 
  - `CPPDEFS`
-
-   Other options, mainly: what yield() implementation to use
-   (`-DHAVE_PTHREAD_YIELD`, `-DHAVE_SCHED_YIELD`, or `-DHAVE_YIELD`).
-   This is needed for the slot-list implementation.
 
    `CPPDEFS` can also be used to set `NDEBUG`.
 
@@ -214,8 +230,17 @@ Several atomic primitives implementations are available:
  - global pthread mutex
  - no synchronization (watch the test blow up!)
 
-TODO
-----
+# TODO
+
+ - Don't create a pthread-specific variable for each TSV.  Instead share
+   one pthread-specific for all TSVs.  This would require having the
+   pthread-specific values be a pointer to a structure that has a
+   pointer to an array of per-TSV elements, with
+   `thread_safe_var_init()` allocating an array index for each TSV.
+
+   This is important because there can be a maximum number of
+   pthread-specifics and we must not be the cause of exceeding that
+   maximum.
 
  - Add an attributes optional input argument to the init function.
 
@@ -232,7 +257,7 @@ TODO
    the current value's version number is the given one.)
 
  - Add an API for waiting for values older than some version number to
-   be released
+   be released?
   
    This is tricky for the slot-pair case because we don't have a list of
    extant values, but we need it in order to determine what is the
@@ -261,25 +286,17 @@ TODO
    Note too that both implementations can (or do) defer calling of the
    value destructor so that reading is fast.  This should be an option.
 
- - Make this cache-friendly.  In particular, the slot-list case could
-   have the growable slot-array be an array of pointers to slots instead
-   of an array of slots.  Or slots could be sized more carefully, adding
-   padding if need be.
+ - Add a static initializer?
 
- - Maybe add a static initializer... as a function-style macro that
-   takes a destructor function argument.  This basically means adding a
-   `pthread_once_t` to the variable.  C99 would then be required though
-   (for the initializer).
+ - Add a better build system.
 
- - Add a proper build system.
  - Add an implementation using read-write locks to compare performance
    with.
- - Parametrize the test program.
- - Use symbol names that don't use the `pthread_` prefix, or provide a
-   configuration feature for renaming them with C pre-processor macros.
- - Use symbol names that don't conflict with known atomics libraries (so
-   those can be used as an atomics backend).  Currently the atomics
+
+ - Use symbol names that don't conflict with any known atomics libraries
+   (so those can be used as an atomics backend).  Currently the atomics
    symbols are loosely based on Illumos atomics primitives.
+
  - Support Win32 (perhaps by building a small pthread compatibility
    library; only mutexes and condition variables are needed).
 
