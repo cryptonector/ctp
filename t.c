@@ -49,6 +49,16 @@
 #include "thread_safe_global.h"
 #include "atomics.h"
 
+#if !defined(USE_TSV_SLOT_PAIR_DESIGN) && !defined(USE_TSV_SUBSCRIPTION_SLOTS_DESIGN)
+#define USE_TSV_SLOT_PAIR_DESIGN
+#endif
+#ifdef USE_TSV_SLOT_PAIR_DESIGN
+#define TSV_TYPE "slotpair"
+#endif
+#ifdef USE_TSV_SUBSCRIPTION_SLOTS_DESIGN
+#define TSV_TYPE "slotlist"
+#endif
+
 /*
  * TODO:
  *
@@ -217,6 +227,8 @@ main(int argc, char **argv)
         writerq = 20;
     nthreads = MY_NTHREADS;
 
+    printf("Testing the thread-safe variable implementation type \"%s\"\n",
+           TSV_TYPE);
     printf("Will use %ju reader threads and %ju writer threads\n",
            (uintmax_t)nreaders, (uintmax_t)nwriters);
     printf("Readers will print every %ju runs\n", (uintmax_t)readerq);
