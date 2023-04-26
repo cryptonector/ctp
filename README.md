@@ -1,19 +1,26 @@
 
 > NOTE: This repo is mirrored at https://github.com/cryptonector/ctp and https://github.com/nicowilliams/ctp
 
-# Q: What is it?  A: A user-land-RCU-like API for C
+# Q: What is it?  A: A user-land-RCU-like API for C, permissively licensed
 
 This repository's only current feature is a read-copy-update (RCU) like,
 thread-safe variable (TSV) for C.  More C thread-primitives may be added
-in the future, thus the repository's name.
+in the future, thus the repository's name being quite generic.
 
 A TSV lets readers safely keep using a value read from the TSV until
 they read the next value.  Memory management is automatic: values are
 automatically destroyed when the last reference to a value is released
 whether explicitly, or implicitly at the next read, or when a reader
-thread exits.  Reads are _lock-less_ and fast, and _never block
-writers_.  Writers are serialized but otherwise interact with readers
-without locks, thus writes *do not block reads*.
+thread exits.  References can also be relinquished manually.  Reads are
+_lock-less_ and fast, and _never block writers_.  Writers are serialized
+but otherwise interact with readers without locks, thus writes *do not
+block reads*.
+
+> In one of the two implementations included readers only execute atomic
+> memory loads and stores, though they loop over that when racing with a
+> writer.  As aligned loads and stores are typically atomic on modern
+> archictures, this means no expensive atomic operations are needed --
+> not even a single atomic increment or decrement.
 
 This is not unlike a Clojure `ref`, or like a Haskell `msync`.  It's
 also similar to RCU, but unlike RCU, this has a very simple API with
@@ -157,8 +164,8 @@ In the future this may be upgraded to a C99 or even C11 requirement.
 # Testing
 
 A test program is included that hammers the implementation.  Run it in a
-loop, with or without valgrind, ASAN (address sanitizer), or other
-memory checkers, to look for racy bugs.
+loop, with or without helgrind, TSAN (thread sanitizer), or other thread
+race checkers, to look for data races.
 
 Both implementations perform similarly well on the included test.
 
