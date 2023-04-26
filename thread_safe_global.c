@@ -556,7 +556,7 @@ thread_safe_var_set(thread_safe_var vp, void *cfdata,
     nref = atomic_inc_32_nv(&wrapper->nref);
     assert(nref == 1);
 
-    assert(old_wrapper != NULL && old_wrapper->nref > 0);
+    assert(old_wrapper != NULL && atomic_read_32(&old_wrapper->nref) > 0);
 
     /* Wait until that slot is quiescent before mutating it */
     if ((err = pthread_mutex_lock(&vp->cv_lock)) != 0) {
@@ -594,7 +594,7 @@ thread_safe_var_set(thread_safe_var vp, void *cfdata,
     assert(v->version > v->other->version);
 
     /* Release the old cf */
-    assert(old_wrapper != NULL && old_wrapper->nref > 0);
+    assert(old_wrapper != NULL && atomic_read_32(&old_wrapper->nref) > 0);
     wrapper_free(old_wrapper);
 
     /* Done */
