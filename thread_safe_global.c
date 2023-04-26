@@ -293,7 +293,13 @@ thread_safe_var_init(thread_safe_var *vpp,
     vp->vars[1].other = &vp->vars[0]; /* other pointer never changes */
     vp->dtor = dtor;
 
+    /*
+     * Acquiring and dropping the lock functions as a trivial memory
+     * barrier.
+     */
+    pthread_mutex_lock(&vp->write_lock);
     *vpp = vp;
+    pthread_mutex_unlock(&vp->write_lock);
     return 0;
 }
 
@@ -944,6 +950,13 @@ thread_safe_var_init(thread_safe_var *vpp,
 
     assert(get_slot(vp, 0) != NULL);
 
+    /*
+     * Acquiring and dropping the lock functions as a trivial memory
+     * barrier.
+     */
+    pthread_mutex_lock(&vp->write_lock);
+    *vpp = vp;
+    pthread_mutex_unlock(&vp->write_lock);
     *vpp = vp;
     return 0;
 }
