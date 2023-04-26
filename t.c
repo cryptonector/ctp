@@ -117,8 +117,6 @@ static struct timespec *starttimes;
 static struct timespec *endtimes;
 static struct timespec *runtimes;
 static struct timespec *sleeptimes;
-static struct timespec *idlestarttimes;
-static struct timespec *idleendtimes;
 static struct timespec *idleruntimes;
 
 enum magic {
@@ -236,8 +234,6 @@ main(int argc, char **argv)
         MY_CALLOC1(endtimes, MY_NTHREADS) ||
         MY_CALLOC1(runtimes, MY_NTHREADS) ||
         MY_CALLOC1(sleeptimes, MY_NTHREADS) ||
-        MY_CALLOC1(idlestarttimes, MY_NTHREADS) ||
-        MY_CALLOC1(idleendtimes, MY_NTHREADS) ||
         MY_CALLOC1(idleruntimes, MY_NTHREADS))
         err(1, "calloc failed");
 
@@ -531,12 +527,13 @@ static void *
 idle_reader(void *data)
 {
     int thread_num = (uint32_t *)data - idleruns;
+    struct timespec start, end, t;
     uint64_t version;
     uint64_t i;
     void *p;
     int first = 1;
 
-    if (clock_gettime(CLOCK_MONOTONIC, &idlestarttimes[thread_num]) != 0)
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
     for (i = idleruns[thread_num]; i > 0; i--) {
@@ -550,11 +547,22 @@ idle_reader(void *data)
         }
     }
 
-    if (clock_gettime(CLOCK_MONOTONIC, &idleendtimes[thread_num]) != 0)
+    if (clock_gettime(CLOCK_MONOTONIC, &end) != 0)
         err(1, "clock_gettime(CLOCK_MONOTONIC) failed");
 
-    idleruntimes[thread_num] = timesub(idleendtimes[thread_num],
-                                       idlestarttimes[thread_num]);
+    t = timesub(end, start);
+    if (sizeof(t.tv_sec) == 4)
+        atomic_write_32((volatile uint32_t *)&idleruntimes[thread_num].tv_sec, t.tv_sec);
+    else if (sizeof(t.tv_sec) == 8)
+        atomic_write_64((volatile uint64_t *)&idleruntimes[thread_num].tv_sec, t.tv_sec);
+    else
+        abort();
+    if (sizeof(t.tv_nsec) == 4)
+        atomic_write_32((volatile uint32_t *)&idleruntimes[thread_num].tv_nsec, t.tv_nsec);
+    else if (sizeof(t.tv_sec) == 8)
+        atomic_write_64((volatile uint64_t *)&idleruntimes[thread_num].tv_nsec, t.tv_nsec);
+    else
+        abort();
 
     atomic_dec_32_nv(&nthreads);
     if ((errno = pthread_mutex_lock(&exit_cv_lock)) != 0)
