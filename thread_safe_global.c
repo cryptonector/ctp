@@ -515,6 +515,7 @@ thread_safe_var_set(thread_safe_var vp, void *cfdata,
     wrapper->nref = 0;
     wrapper->ptr = cfdata;
 
+    /* This functions as a memory barrier for the above writes */
     if ((err = pthread_mutex_lock(&vp->write_lock)) != 0) {
         free(wrapper);
         return err;
@@ -534,6 +535,7 @@ thread_safe_var_set(thread_safe_var vp, void *cfdata,
             v = &vp->vars[i];
             nref = atomic_inc_32_nv(&wrapper->nref);
             v->version = 0;
+            /* This functions as a memory barrier for the above writes */
             tmp = atomic_cas_ptr((volatile void **)&v->wrapper,
                                  old_wrapper, wrapper);
             assert(tmp == old_wrapper && tmp == NULL);
@@ -587,7 +589,7 @@ thread_safe_var_set(thread_safe_var vp, void *cfdata,
     tmp = atomic_cas_ptr((volatile void **)&v->wrapper, old_wrapper, wrapper);
     assert(tmp == old_wrapper);
     v->version = *new_version;
-    tmp_version = atomic_inc_64_nv(&vp->next_version);
+    tmp_version = atomic_inc_64_nv(&vp->next_version); /* Memory barrier */
     assert(tmp_version == *new_version + 1);
     assert(v->version > v->other->version);
 
