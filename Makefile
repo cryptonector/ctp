@@ -10,7 +10,7 @@ endif
 
 COPTFLAG = -O0
 CDBGFLAG = -ggdb3
-CSANFLAG = -fsanitize=address -fsanitize=undefined
+CSANFLAG = -fsanitize=undefined -fsanitize=thread
 
 # Atomics backends: -DHAVE___ATOMIC,
 # 		    -DHAVE___SYNC,
