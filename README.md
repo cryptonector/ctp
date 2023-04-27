@@ -257,130 +257,20 @@ the correctness of TSVs would add value.
 
 # Helgrind Data Race Reports
 
-Helgrind reports a number of possible data races.  Many of them are
-indeed races, just safe races.  For example this one:
+Currently Helgrind produces no race reports.  Using the
+`ANNOTATE_HAPPENS_BEFORE()` and `ANNOTATE_HAPPENS_AFTER()` macros in
+`<valgrind/helgrind.h>` provides Helgrind with the information it needs.
 
-```
-Possible data race during write of size 8 at 0x4AAA930 by thread #4
-Locks held: 1, at address 0x4AAA8A8
-   at 0x485FAD4: atomic_write_ptr (atomics.c:298)
-   by 0x485F09B: thread_safe_var_set (thread_safe_global.c:1126)
-   by 0x10C05F: writer (t.c:627)
-   by 0x484E8AA: ??? (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x4913946: start_thread (pthread_create.c:435)
-   by 0x49A3A43: clone (clone.S:100)
+Use `make ... CPPDEFS=-DUSE_HELGRIND CSANFLAG=` to enable those macros.
 
-This conflicts with a previous read of size 8 by thread #3
-Locks held: none
-   at 0x485FA8E: atomic_read_ptr (atomics.c:232)
-   by 0x485EEDF: thread_safe_var_get (thread_safe_global.c:1049)
-   by 0x485F7E1: thread_safe_var_wait (thread_safe_global.c:1321)
-   by 0x10B598: reader (t.c:476)
-   by 0x484E8AA: ??? (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x4913946: start_thread (pthread_create.c:435)
-   by 0x49A3A43: clone (clone.S:100)
- Address 0x4aaa930 is 144 bytes inside a block of size 176 alloc'd
-   at 0x484AAA3: calloc (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x485EA60: thread_safe_var_init (thread_safe_global.c:919)
-   by 0x10A19D: main (t.c:259)
- Block was alloc'd by thread #1
-```
+> It is important to not use TSAN and Helgrind at the same time, as that
+> makes Helgrind crash.  To disable TSAN set `CSANFLAG=` on the `make`
+> command-line.
 
-Which corresponds to this:
-
-```C
-1125     /* Publish the new value */
-1126     atomic_write_ptr((volatile void **)&vp->values, new_value);
-1127     vp->nvalues++;
-```
-
-```C
-1048     while (atomic_read_ptr((volatile void **)&slot->value) !=
-1049            (newest = atomic_read_ptr((volatile void **)&vp->values)))
-1050         atomic_write_ptr((volatile void **)&slot->value, newest);
-```
-
-And, assuming the atomic read/write operations correctly implement
-consumer/producer memory barriers, then this is safe because of that
-loop at 1048-1050.
-
-The thread sanitizer does not report these races.  Changing some of
-these atomics to non-atomics does cause the thread sanitizer to report
-the race:
-
-```diff
-diff --git a/thread_safe_global.c b/thread_safe_global.c
-index 58e8a62..2a788ca 100644
---- a/thread_safe_global.c
-+++ b/thread_safe_global.c
-@@ -1047,7 +1047,7 @@ thread_safe_var_get(thread_safe_var vp, void **res, uint64_t *version)
-      */
-     while (atomic_read_ptr((volatile void **)&slot->value) !=
-            (newest = atomic_read_ptr((volatile void **)&vp->values)))
--        atomic_write_ptr((volatile void **)&slot->value, newest);
-+        slot->value = newest;
-
-     if (newest != NULL) {
-         *res = newest->value;
-```
-
-causes TSAN to report:
-
-```
-WARNING: ThreadSanitizer: data race (pid=746793)
-  Write of size 8 at 0x7b1800000000 by thread T1 (mutexes: write M10):
-    #0 thread_safe_var_get /home/nico/ws/ctp/thread_safe_global.c:1050 (libtsgv.so+0x5e42)
-    #1 thread_safe_var_wait /home/nico/ws/ctp/thread_safe_global.c:1328 (libtsgv.so+0x8059)
-    #2 reader /home/nico/ws/ctp/t.c:476 (t+0x8fe7)
-
-  Previous atomic read of size 8 at 0x7b1800000000 by thread T3 (mutexes: write M9):
-    #0 __tsan_atomic64_load ../../../../src/libsanitizer/tsan/tsan_interface_atomic.cpp:539 (libtsan.so.0+0x7fe0e)
-    #1 atomic_read_ptr /home/nico/ws/ctp/atomics.c:232 (libtsgv.so+0x844f)
-    #2 mark_values /home/nico/ws/ctp/thread_safe_global.c:1242 (libtsgv.so+0x6ee3)
-    #3 thread_safe_var_set /home/nico/ws/ctp/thread_safe_global.c:1138 (libtsgv.so+0x6ee3)
-    #4 writer /home/nico/ws/ctp/t.c:626 (t+0x8305)
-```
-
-and more.
-
-And this Helgrind report:
-
-```
-Possible data race during write of size 1 at 0x4AAA047 by thread #3
-Locks held: none
-   at 0x48546D6: mempcpy (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x490A631: _IO_new_file_xsputn (fileops.c:1236)
-   by 0x490A631: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1197)
-   by 0x48F4079: outstring_func (vfprintf-internal.c:239)
-   by 0x48F4079: __vfprintf_internal (vfprintf-internal.c:1404)
-   by 0x48DF58E: printf (printf.c:33)
-   by 0x10B57E: reader (t.c:474)
-   by 0x484E8AA: ??? (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x4913946: start_thread (pthread_create.c:435)
-   by 0x49A3A43: clone (clone.S:100)
-
-This conflicts with a previous write of size 1 by thread #2
-Locks held: none
-   at 0x48546D6: mempcpy (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x490A631: _IO_new_file_xsputn (fileops.c:1236)
-   by 0x490A631: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1197)
-   by 0x48F4079: outstring_func (vfprintf-internal.c:239)
-   by 0x48F4079: __vfprintf_internal (vfprintf-internal.c:1404)
-   by 0x48DF58E: printf (printf.c:33)
-   by 0x10B57E: reader (t.c:474)
-   by 0x484E8AA: ??? (in /usr/libexec/valgrind/vgpreload_helgrind-amd64-linux.so)
-   by 0x4913946: start_thread (pthread_create.c:435)
-   by 0x49A3A43: clone (clone.S:100)
-```
-
-is almost certainly not a bug in glibc but a spurious data race report
-from Helgrind.
-
-I'm still investigating all the Helgrind possible data race reports.
-
-Because TSAN is intimately involved with the compiler, and because
-Helgrind does not seem to understand atomic operations, I currently
-trust TSAN more than Helgrind for lock-less data structures.
+As with TSAN, it is trivial to make Helgrind report data races by not
+using `CPPDEFS=-DUSE_HELGRIND` (but still using `CSANFLAG=`) then
+running `helgrind ./t`, which then reports data races at places in the
+source code that use atomic operations to... avoid data races.
 
 # TODO
 
