@@ -1268,8 +1268,10 @@ mark_values(thread_safe_var vp)
             continue;
         }
 
+#ifndef NDEBUG
         for (v2 = vp->values; v2 != NULL; v2 = v2->next)
             assert(v2 != v);
+#endif
     }
     free(old_values_array);
 
