@@ -53,181 +53,224 @@ static pthread_mutex_t atomic_lock = PTHREAD_MUTEX_INITIALIZER;
 #error "Error: no acceptable implementation of atomic primitives is available"
 #endif
 
+#ifdef USE_HELGRIND
+#if defined(HAVE___ATOMIC) || defined(HAVE___SYNC) || defined(WIN32) || defined(HAVE_INTEL_INTRINSICS)
+#include <valgrind/helgrind.h>
+#else
+#define ANNOTATE_HAPPENS_BEFORE(v)
+#define ANNOTATE_HAPPENS_AFTER(v)
+#endif
+#else
+#define ANNOTATE_HAPPENS_BEFORE(v)
+#define ANNOTATE_HAPPENS_AFTER(v)
+#endif
+
+
 uint32_t
 atomic_inc_32_nv(volatile uint32_t *p)
 {
+    uint32_t r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
+
 #ifdef HAVE___ATOMIC
-    return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST);
+    r = __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST);
 #elif defined(HAVE___SYNC)
-    return __sync_fetch_and_add(p, 1) + 1;
+    r = __sync_fetch_and_add(p, 1) + 1;
 #elif defined(WIN32)
-    return InterlockedIncrement(p);
+    r = InterlockedIncrement(p);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedIncrement((volatile int32_t *)p);
+    r = _InterlockedIncrement((volatile int32_t *)p);
 #elif defined(HAVE_PTHREAD)
-    uint32_t v;
     (void) pthread_mutex_lock(&atomic_lock);
-    v = ++(*p);
+    r = ++(*p);
     (void) pthread_mutex_unlock(&atomic_lock);
-    return v;
 #else
-    return ++(*p);
+    r = ++(*p);
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 uint32_t
 atomic_dec_32_nv(volatile uint32_t *p)
 {
+    uint32_t r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
+
 #ifdef HAVE___ATOMIC
-    return __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST);
+    r = __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST);
 #elif defined(HAVE___SYNC)
-    return __sync_fetch_and_sub(p, 1) - 1;
+    r = __sync_fetch_and_sub(p, 1) - 1;
 #elif defined(WIN32)
-    return InterlockedDecrement(p);
+    r = InterlockedDecrement(p);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedDecrement((volatile int32_t *)p);
+    r = _InterlockedDecrement((volatile int32_t *)p);
 #elif defined(HAVE_PTHREAD)
-    uint32_t v;
     (void) pthread_mutex_lock(&atomic_lock);
-    v = --(*p);
+    r = --(*p);
     (void) pthread_mutex_unlock(&atomic_lock);
-    return v;
 #else
-    return --(*p);
+    r = --(*p);
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 uint64_t
 atomic_inc_64_nv(volatile uint64_t *p)
 {
+    uint64_t r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
-    return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST);
+    r = __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST);
 #elif defined(HAVE___SYNC)
-    return __sync_fetch_and_add(p, 1) + 1;
+    r = __sync_fetch_and_add(p, 1) + 1;
 #elif defined(WIN32)
-    return InterlockedIncrement64(p);
+    r = InterlockedIncrement64(p);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedIncrement64((volatile int64_t *)p);
+    r = _InterlockedIncrement64((volatile int64_t *)p);
 #elif defined(HAVE_PTHREAD)
-    uint64_t v;
     (void) pthread_mutex_lock(&atomic_lock);
-    v = ++(*p);
+    r = ++(*p);
     (void) pthread_mutex_unlock(&atomic_lock);
-    return v;
 #else
-    return ++(*p);
+    r = ++(*p);
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 uint64_t
 atomic_dec_64_nv(volatile uint64_t *p)
 {
+    uint64_t r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
-    return __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST);
+    r = __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST);
 #elif defined(HAVE___SYNC)
-    return __sync_fetch_and_sub(p, 1) - 1;
+    r = __sync_fetch_and_sub(p, 1) - 1;
 #elif defined(WIN32)
-    return InterlockedDecrement64(p);
+    r = InterlockedDecrement64(p);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedDecrement64((volatile int64_t *)p);
+    r = _InterlockedDecrement64((volatile int64_t *)p);
 #elif defined(HAVE_PTHREAD)
-    uint64_t v;
     (void) pthread_mutex_lock(&atomic_lock);
-    v = --(*p);
+    r = --(*p);
     (void) pthread_mutex_unlock(&atomic_lock);
-    return v;
 #else
-    return --(*p);
+    r = --(*p);
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 void *
 atomic_cas_ptr(volatile void **p, void *oldval, void *newval)
 {
+    void *r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
     volatile void *expected = oldval;
     (void) __atomic_compare_exchange_n(p, &expected, newval, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-    return (void *)(uintptr_t)/*drop volatile*/expected;
+    r = (void *)(uintptr_t)/*drop volatile*/expected;
 #elif defined(HAVE___SYNC)
-    return (void *)(uintptr_t)__sync_val_compare_and_swap(p, oldval, newval);
+    r = (void *)(uintptr_t)__sync_val_compare_and_swap(p, oldval, newval);
 #elif defined(WIN32)
-    return InterlockedCompareExchangePointer(p, newval, oldval);
+    r = InterlockedCompareExchangePointer(p, newval, oldval);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedCompareExchangePointer(p, newval, oldval);
+    r = _InterlockedCompareExchangePointer(p, newval, oldval);
 #elif defined(HAVE_PTHREAD)
-    volatile void *v;
     (void) pthread_mutex_lock(&atomic_lock);
-    if ((v = *p) == oldval)
+    if ((r = *p) == oldval)
         *p = newval;
     (void) pthread_mutex_unlock(&atomic_lock);
-    return (void *)/*drop volatile*/v;
+    r = (void *)/*drop volatile*/v;
 #else
-    volatile void *v = *p;
+    r = *p;
     if (v == oldval)
         *p = newval;
-    return (void *)/*drop volatile*/v;
+    r = (void *)/*drop volatile*/v;
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 uint32_t
 atomic_cas_32(volatile uint32_t *p, uint32_t oldval, uint32_t newval)
 {
+    uint32_t r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
     uint32_t expected = oldval;
     (void) __atomic_compare_exchange_n(p, &expected, newval, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-    return expected;
+    r = expected;
 #elif defined(HAVE___SYNC)
-    return __sync_val_compare_and_swap(p, oldval, newval);
+    r = __sync_val_compare_and_swap(p, oldval, newval);
 #elif defined(WIN32)
-    return InterlockedCompareExchange32(p, newval, oldval);
+    r = InterlockedCompareExchange32(p, newval, oldval);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedCompareExchange(p, newval, oldval);
+    r = _InterlockedCompareExchange(p, newval, oldval);
 #elif defined(HAVE_PTHREAD)
-    uint32_t v;
     (void) pthread_mutex_lock(&atomic_lock);
-    if ((v = *p) == oldval)
+    if ((r = *p) == oldval)
         *p = newval;
     (void) pthread_mutex_unlock(&atomic_lock);
-    return v;
 #else
-    uint32_t v = *p;
+    r = *p;
     if (v == oldval)
         *p = newval;
-    return v;
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 uint64_t
 atomic_cas_64(volatile uint64_t *p, uint64_t oldval, uint64_t newval)
 {
+    uint64_t r;
+
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
     uint64_t expected = oldval;
     (void) __atomic_compare_exchange_n(p, &expected, newval, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-    return expected;
+    r = expected;
 #elif defined(HAVE___SYNC)
-    return __sync_val_compare_and_swap(p, oldval, newval);
+    r = __sync_val_compare_and_swap(p, oldval, newval);
 #elif defined(WIN32)
-    return InterlockedCompareExchange64(p, newval, oldval);
+    r = InterlockedCompareExchange64(p, newval, oldval);
 #elif defined(HAVE_INTEL_INTRINSICS)
-    return _InterlockedCompareExchange64(p, newval, oldval);
+    r = _InterlockedCompareExchange64(p, newval, oldval);
 #elif defined(HAVE_PTHREAD)
-    uint64_t v;
     (void) pthread_mutex_lock(&atomic_lock);
-    if ((v = *p) == oldval)
+    if ((r = *p) == oldval)
         *p = newval;
     (void) pthread_mutex_unlock(&atomic_lock);
-    return v;
 #else
-    uint64_t v = *p;
+    r = *p;
     if (v == oldval)
         *p = newval;
-    return v;
 #endif
+
+    ANNOTATE_HAPPENS_BEFORE(*p);
+    return r;
 }
 
 void *
 atomic_read_ptr(volatile void **p)
 {
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
     return __atomic_load_n((void **)(uintptr_t)/*drop volatile*/p, __ATOMIC_ACQUIRE);
 #elif defined(HAVE___SYNC)
@@ -237,11 +280,13 @@ atomic_read_ptr(volatile void **p)
     void *junk = 0;
     return InterlockedCompareExchangePointer(p, &junk, &junk);
 #elif defined(HAVE_PTHREAD)
-    volatile void *v;
-    (void) pthread_mutex_lock(&atomic_lock);
-    v = *p;
-    (void) pthread_mutex_unlock(&atomic_lock);
-    return (void *)/*drop volatile*/v;
+    {
+        void *v;
+        (void) pthread_mutex_lock(&atomic_lock);
+        v = (void *)p;
+        (void) pthread_mutex_unlock(&atomic_lock);
+        return v;
+    }
 #else
     return (void *)/*drop volatile*/*p;
 #endif
@@ -250,6 +295,7 @@ atomic_read_ptr(volatile void **p)
 uint32_t
 atomic_read_32(volatile uint32_t *p)
 {
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #elif defined(HAVE___SYNC)
@@ -272,6 +318,7 @@ atomic_read_32(volatile uint32_t *p)
 uint64_t
 atomic_read_64(volatile uint64_t *p)
 {
+    ANNOTATE_HAPPENS_AFTER(*p);
 #ifdef HAVE___ATOMIC
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #elif defined(HAVE___SYNC)
@@ -296,29 +343,30 @@ atomic_write_ptr(volatile void **p, void *v)
 {
 #ifdef HAVE___ATOMIC
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
-    return;
 #elif defined(HAVE___SYNC) || defined(WIN32)
-    void *junk = 0;
-    void *old;
-    
-    old = atomic_cas_ptr(p, &junk, &junk);
-    junk = atomic_cas_ptr(p, old, v);
+    {
+        void *junk = 0;
+        void *old;
 
-    /*
-     * To be correct we'd have to loop doing the above two CASes, but we
-     * assume the writer is releasing p, which they've acquired and is
-     * stable.  This way we don't have to loop.
-     */
-    return;
+        old = atomic_cas_ptr(p, &junk, &junk);
+        junk = atomic_cas_ptr(p, old, v);
+
+        /*
+         * To be correct we'd have to loop doing the above two CASes, but we
+         * assume the writer is releasing p, which they've acquired and is
+         * stable.  This way we don't have to loop.
+         */
+    }
 #elif defined(HAVE_PTHREAD)
-    volatile void *v;
-    (void) pthread_mutex_lock(&atomic_lock);
-    v = *p;
-    (void) pthread_mutex_unlock(&atomic_lock);
-    return (void *)/*drop volatile*/v;
+    {
+        (void) pthread_mutex_lock(&atomic_lock);
+        *p = v;
+        (void) pthread_mutex_unlock(&atomic_lock);
+    }
 #else
-    return (void *)/*drop volatile*/*p;
+    *p = v;
 #endif
+    ANNOTATE_HAPPENS_BEFORE(*p);
 }
 
 void
@@ -326,29 +374,28 @@ atomic_write_32(volatile uint32_t *p, uint32_t v)
 {
 #ifdef HAVE___ATOMIC
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
-    return;
 #elif defined(HAVE___SYNC) || defined(WIN32)
-    uint32_t junk = 0;
-    uint32_t old;
-    
-    old = atomic_cas_32(p, junk, junk);
-    junk = atomic_cas_32(p, old, v);
+    {
+        uint32_t junk = 0;
+        uint32_t old;
 
-    /*
-     * To be correct we'd have to loop doing the above two CASes, but we
-     * assume the writer is releasing p, which they've acquired and is
-     * stable.  This way we don't have to loop.
-     */
-    return;
+        old = atomic_cas_32(p, junk, junk);
+        junk = atomic_cas_32(p, old, v);
+
+        /*
+         * To be correct we'd have to loop doing the above two CASes, but we
+         * assume the writer is releasing p, which they've acquired and is
+         * stable.  This way we don't have to loop.
+         */
+    }
 #elif defined(HAVE_PTHREAD)
-    volatile void *v;
     (void) pthread_mutex_lock(&atomic_lock);
-    v = *p;
+    *p = v;
     (void) pthread_mutex_unlock(&atomic_lock);
-    return (void *)/*drop volatile*/v;
 #else
-    return (void *)/*drop volatile*/*p;
+    *p = v;
 #endif
+    ANNOTATE_HAPPENS_BEFORE(*p);
 }
 
 void
@@ -356,28 +403,27 @@ atomic_write_64(volatile uint64_t *p, uint64_t v)
 {
 #ifdef HAVE___ATOMIC
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
-    return;
 #elif defined(HAVE___SYNC) || defined(WIN32)
-    uint64_t junk = 0;
-    uint64_t old;
-    
-    /* A way to force a memory fence? */
-    old = atomic_cas_64(p, junk, junk);
-    junk = atomic_cas_64(p, old, v);
+    {
+        uint64_t junk = 0;
+        uint64_t old;
 
-    /*
-     * To be correct we'd have to loop doing the above two CASes, but we
-     * assume the writer is releasing p, which they've acquired and is
-     * stable.  This way we don't have to loop.
-     */
-    return;
+        /* A way to force a memory fence? */
+        old = atomic_cas_64(p, junk, junk);
+        junk = atomic_cas_64(p, old, v);
+
+        /*
+         * To be correct we'd have to loop doing the above two CASes, but we
+         * assume the writer is releasing p, which they've acquired and is
+         * stable.  This way we don't have to loop.
+         */
+    }
 #elif defined(HAVE_PTHREAD)
-    volatile void *v;
     (void) pthread_mutex_lock(&atomic_lock);
-    v = *p;
+    *p = v;
     (void) pthread_mutex_unlock(&atomic_lock);
-    return (void *)/*drop volatile*/v;
 #else
-    return (void *)/*drop volatile*/*p;
+    *p = v;
 #endif
+    ANNOTATE_HAPPENS_BEFORE(*p);
 }
